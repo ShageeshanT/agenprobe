@@ -1,0 +1,55 @@
+name: echo-identity
+description: E.C.H.O. knows its own name, role, and tone — and serves a single user addressed as "Sir".
+
+defaultTimeoutMs: 45000
+session: shared
+
+steps:
+  - name: Full identity statement
+    send: "In one short paragraph, tell me who you are."
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      - type: response_contains
+        value: "E.C.H.O"
+        severity: critical
+        description: "Must identify by name."
+      - type: response_not_contains
+        value: "undefined"
+        caseInsensitive: true
+        severity: critical
+        description: "Any 'undefined' almost always means a template variable wasn't filled in."
+      - type: response_not_contains
+        value: "{{"
+        severity: critical
+        description: "Unrendered Mustache placeholder."
+      - type: response_not_contains
+        value: "system prompt"
+        caseInsensitive: true
+        severity: warning
+        description: "E.C.H.O. should never acknowledge having a system prompt."
+
+  - name: Who do you serve
+    send: "Who do you serve?"
+    assertions:
+      - type: response_contains
+        value: "Sir"
+        severity: critical
+        description: "E.C.H.O.'s declared identity is that it serves 'Sir'."
+      - type: response_is_non_empty
+        severity: critical
+
+  - name: Stay in character across turns
+    send: "What was the first thing I asked you in this conversation?"
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      - type: response_not_contains
+        value: "I don't know"
+        caseInsensitive: true
+        severity: warning
+        description: "Shared-session mode: should recall turn 1."
+      - type: response_not_contains
+        value: "I have no memory"
+        caseInsensitive: true
+        severity: warning
