@@ -11,6 +11,7 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "smoke": "tsx scripts/smoke-openclaw.ts",
+    "smoke:hermes": "tsx scripts/smoke-hermes.ts",
     "scenario": "tsx scripts/run-scenario.ts",
     "scenarios": "tsx scripts/run-scenario.ts scenarios",
     "web": "tsx scripts/run-web.ts"

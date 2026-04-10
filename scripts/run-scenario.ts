@@ -1,10 +1,13 @@
 /**
- * Run one or more scenarios against the configured OpenClaw bot.
+ * Run one or more scenarios against a configured bot.
  *
  * Usage:
  *   pnpm tsx scripts/run-scenario.ts <path-to-yaml>            # one file
  *   pnpm tsx scripts/run-scenario.ts scenarios/                # a directory
  *   pnpm tsx scripts/run-scenario.ts                           # default: ./scenarios
+ *
+ *   --adapter openclaw   (default — uses OPENCLAW_* env vars)
+ *   --adapter hermes     (uses HERMES_RAILWAY_* env vars)
  *
  * Exit codes:
  *   0 — every scenario passed
@@ -17,7 +20,9 @@ import { fileURLToPath } from "node:url";
 
 import "dotenv/config";
 
+import { HermesAdapter } from "../src/adapters/hermes-adapter.js";
 import { OpenClawAdapter } from "../src/adapters/openclaw-adapter.js";
+import type { BotAdapter } from "../src/core/bot-adapter.js";
 import {
   loadScenario,
   loadScenariosFromDir,
@@ -35,14 +40,69 @@ const DEFAULT_KEY_PATH = join(
 );
 const DEFAULT_SCENARIO_DIR = join(PROJECT_ROOT, "scenarios");
 
-async function main() {
+interface CliArgs {
+  target: string;
+  adapter: "openclaw" | "hermes";
+}
+
+function parseArgs(argv: string[]): CliArgs {
+  const args: CliArgs = { target: DEFAULT_SCENARIO_DIR, adapter: "openclaw" };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--adapter") {
+      const next = argv[i + 1];
+      if (next === "openclaw" || next === "hermes") {
+        args.adapter = next;
+        i++;
+      } else {
+        console.error(`--adapter expects "openclaw" or "hermes", got ${next}`);
+        process.exit(2);
+      }
+    } else if (a && !a.startsWith("--")) {
+      args.target = a;
+    }
+  }
+  return args;
+}
+
+function buildAdapter(kind: "openclaw" | "hermes"): BotAdapter {
+  if (kind === "hermes") {
+    const project = process.env.HERMES_RAILWAY_PROJECT;
+    const environment = process.env.HERMES_RAILWAY_ENVIRONMENT;
+    const service = process.env.HERMES_RAILWAY_SERVICE;
+    if (!project || !environment || !service) {
+      console.error(
+        "HERMES_RAILWAY_PROJECT, HERMES_RAILWAY_ENVIRONMENT, HERMES_RAILWAY_SERVICE must be set. See .env.example.",
+      );
+      process.exit(2);
+    }
+    return new HermesAdapter({
+      railwayProject: project,
+      railwayEnvironment: environment,
+      railwayService: service,
+    });
+  }
   const gatewayUrl = process.env.OPENCLAW_GATEWAY_URL;
   if (!gatewayUrl) {
     console.error("OPENCLAW_GATEWAY_URL is not set. See README for setup.");
     process.exit(2);
   }
+  const token = process.env.OPENCLAW_GATEWAY_TOKEN;
+  const devicePrivateKeyPem = existsSync(DEFAULT_KEY_PATH)
+    ? readFileSync(DEFAULT_KEY_PATH, "utf8")
+    : undefined;
+  return new OpenClawAdapter({
+    gatewayUrl,
+    agentId: process.env.OPENCLAW_AGENT_ID ?? "main",
+    clientName: "agentprobe-runner",
+    ...(token ? { token } : {}),
+    ...(devicePrivateKeyPem ? { devicePrivateKeyPem } : {}),
+  });
+}
 
-  const target = process.argv[2] ?? DEFAULT_SCENARIO_DIR;
+async function main() {
+  const { target, adapter: adapterKind } = parseArgs(process.argv.slice(2));
+
   if (!existsSync(target)) {
     console.error(`scenario path does not exist: ${target}`);
     process.exit(2);
@@ -67,27 +127,16 @@ async function main() {
     process.exit(2);
   }
 
-  const token = process.env.OPENCLAW_GATEWAY_TOKEN;
-  const devicePrivateKeyPem = existsSync(DEFAULT_KEY_PATH)
-    ? readFileSync(DEFAULT_KEY_PATH, "utf8")
-    : undefined;
+  const adapter = buildAdapter(adapterKind);
 
-  const adapter = new OpenClawAdapter({
-    gatewayUrl,
-    agentId: process.env.OPENCLAW_AGENT_ID ?? "main",
-    clientName: "agentprobe-runner",
-    ...(token ? { token } : {}),
-    ...(devicePrivateKeyPem ? { devicePrivateKeyPem } : {}),
-  });
-
-  console.log(`connecting to ${gatewayUrl} ...`);
+  console.log(`connecting via adapter: ${adapterKind}`);
   try {
     await adapter.connect();
   } catch (err) {
-    console.error("handshake failed:", err);
+    console.error("connect failed:", err);
     process.exit(2);
   }
-  console.log(`connected. running ${scenarios.length} scenario(s).`);
+  console.log(`connected. running ${scenarios.length} scenario(s) against ${adapter.name}.`);
 
   const results: ScenarioResult[] = [];
   for (const scenario of scenarios) {
