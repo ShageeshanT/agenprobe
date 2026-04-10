@@ -60,7 +60,10 @@
       "Bash(curl -s http://localhost:4000/api/scenarios)",
       "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}  content-length=%{size_download}  content-type=%{content_type}\\\\n\" http://localhost:4000/)",
       "Bash(curl -s -X POST http://localhost:4000/api/chat -H \"Content-Type: application/json\" -d '{\"text\":\"say exactly: WEB UI OK\"}')",
-      "Bash(curl -s -X POST http://localhost:4000/api/scenarios/basic-ping -H \"Content-Type: application/json\")"
+      "Bash(curl -s -X POST http://localhost:4000/api/scenarios/basic-ping -H \"Content-Type: application/json\")",
+      "Bash(npm run:*)",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}  size=%{size_download}  type=%{content_type}\\\\n\" http://localhost:4000/)",
+      "Bash(curl -s -X POST http://localhost:4000/api/chat -H \"Content-Type: application/json\" -d '{\"text\":\"say exactly: NEW UI WORKS\"}')"
     ]
   }
 }
