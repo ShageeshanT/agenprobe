@@ -1,0 +1,31 @@
+{
+  "name": "agentprobe",
+  "version": "0.0.1",
+  "description": "QA/testing platform for multi-actor AI agent workflows (OpenClaw, Hermes, n8n).",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "smoke": "tsx scripts/smoke-openclaw.ts",
+    "scenario": "tsx scripts/run-scenario.ts",
+    "scenarios": "tsx scripts/run-scenario.ts scenarios",
+    "web": "tsx scripts/run-web.ts"
+  },
+  "dependencies": {
+    "@types/express": "^5.0.6",
+    "dotenv": "^16.4.5",
+    "express": "^5.2.1",
+    "ws": "^8.18.0",
+    "yaml": "^2.8.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/ws": "^8.5.12",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.4"
+  }
+}

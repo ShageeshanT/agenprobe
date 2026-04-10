@@ -1,0 +1,20 @@
+name: tool-awareness
+description: Bot can describe what tools it has access to without crashing or hallucinating.
+
+defaultTimeoutMs: 45000
+session: shared
+
+steps:
+  - name: Ask about tools
+    send: "list the tools you have access to, briefly. one tool per line."
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      - type: response_time_under
+        valueMs: 30000
+        severity: warning
+      - type: response_not_contains
+        value: "error"
+        caseInsensitive: true
+        severity: warning
+        description: "A tool-listing reply containing 'error' usually means something broke."

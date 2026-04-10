@@ -1,0 +1,596 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AgentProbe</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b0d10;
+        --panel: #13161b;
+        --panel-2: #1a1f26;
+        --border: #252b34;
+        --text: #e6e8eb;
+        --muted: #8a93a0;
+        --accent: #6fe3c7;
+        --ok: #7ee6a1;
+        --warn: #e6c07b;
+        --fail: #f17c7c;
+        --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+      }
+      a { color: var(--accent); }
+      header {
+        padding: 18px 24px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+      }
+      header h1 {
+        font-size: 16px;
+        font-weight: 600;
+        margin: 0;
+        letter-spacing: 0.2px;
+      }
+      header .status {
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--muted);
+      }
+      header .status .dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        margin-right: 6px;
+        background: var(--muted);
+        vertical-align: middle;
+      }
+      header .status.ok .dot { background: var(--ok); }
+      header .status.fail .dot { background: var(--fail); }
+
+      main {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1px;
+        background: var(--border);
+        height: calc(100vh - 62px);
+      }
+      .panel {
+        background: var(--bg);
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+      }
+      .panel h2 {
+        margin: 0;
+        padding: 14px 20px;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 1.2px;
+        color: var(--muted);
+        border-bottom: 1px solid var(--border);
+      }
+      .panel .body {
+        flex: 1;
+        overflow: auto;
+        padding: 16px 20px;
+      }
+      .panel .footer {
+        border-top: 1px solid var(--border);
+        padding: 12px 16px;
+      }
+
+      /* chat */
+      .msg {
+        display: flex;
+        gap: 10px;
+        margin-bottom: 14px;
+      }
+      .msg .who {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--muted);
+        min-width: 52px;
+        padding-top: 3px;
+      }
+      .msg .bubble {
+        flex: 1;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 10px 12px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      .msg.user .bubble { background: var(--panel-2); }
+      .msg.meta {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .msg.meta .bubble {
+        background: transparent;
+        border: none;
+        padding: 0;
+        color: var(--muted);
+      }
+      .events {
+        margin-top: 6px;
+        padding: 8px 10px;
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--muted);
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+      }
+      .events div { line-height: 1.4; }
+
+      .composer {
+        display: flex;
+        gap: 8px;
+      }
+      .composer input, .composer textarea {
+        flex: 1;
+        background: var(--panel);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 10px 12px;
+        font: inherit;
+        font-family: inherit;
+        resize: none;
+      }
+      .composer input:focus, .composer textarea:focus {
+        outline: none;
+        border-color: var(--accent);
+      }
+      button {
+        background: var(--accent);
+        color: #0b0d10;
+        border: none;
+        padding: 10px 16px;
+        border-radius: 4px;
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button.secondary {
+        background: transparent;
+        color: var(--text);
+        border: 1px solid var(--border);
+      }
+      button.secondary:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      /* scenarios */
+      .scenario {
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        margin-bottom: 12px;
+        background: var(--panel);
+        overflow: hidden;
+      }
+      .scenario-head {
+        padding: 12px 14px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      .scenario-head .name {
+        font-weight: 600;
+      }
+      .scenario-head .desc {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 3px;
+      }
+      .scenario-head .meta {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .scenario-result {
+        border-top: 1px solid var(--border);
+        padding: 12px 14px;
+        background: var(--panel-2);
+        font-size: 12px;
+      }
+      .verdict {
+        font-family: var(--mono);
+        font-weight: 600;
+        letter-spacing: 0.5px;
+      }
+      .verdict.pass { color: var(--ok); }
+      .verdict.fail { color: var(--fail); }
+      .verdict.warn { color: var(--warn); }
+      .step {
+        margin-top: 10px;
+        padding: 8px 10px;
+        border-left: 3px solid var(--border);
+      }
+      .step.pass { border-left-color: var(--ok); }
+      .step.fail { border-left-color: var(--fail); }
+      .step .name { font-weight: 600; }
+      .step .line {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 2px;
+        overflow-wrap: anywhere;
+      }
+      .assertion {
+        font-family: var(--mono);
+        font-size: 11px;
+        padding: 2px 0;
+      }
+      .assertion.pass::before { content: "[ ok ] "; color: var(--ok); }
+      .assertion.fail::before { content: "[FAIL] "; color: var(--fail); }
+      .assertion.warn::before { content: "[warn] "; color: var(--warn); }
+
+      .muted { color: var(--muted); }
+      .bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 12px;
+        gap: 10px;
+      }
+      .bar .left { font-size: 12px; color: var(--muted); }
+
+      .error-banner {
+        background: rgba(241, 124, 124, 0.1);
+        border: 1px solid var(--fail);
+        color: var(--fail);
+        padding: 10px 14px;
+        border-radius: 4px;
+        margin-bottom: 14px;
+        font-size: 12px;
+        font-family: var(--mono);
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>AgentProbe</h1>
+      <div class="status" id="status"><span class="dot"></span><span id="status-text">connecting…</span></div>
+    </header>
+
+    <main>
+      <section class="panel">
+        <h2>Live chat</h2>
+        <div class="body" id="chat-log">
+          <div class="msg meta"><div class="who"></div><div class="bubble">Type a message below. Each send uses a fresh session unless you pin one.</div></div>
+        </div>
+        <div class="footer">
+          <div class="bar">
+            <div class="left">
+              <label class="muted">
+                <input type="checkbox" id="pin-session" /> Pin session across messages
+              </label>
+            </div>
+            <div class="left"><button class="secondary" id="clear-chat">Clear</button></div>
+          </div>
+          <div class="composer">
+            <textarea id="chat-input" rows="2" placeholder="Ask the bot something..."></textarea>
+            <button id="chat-send">Send</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Scenarios</h2>
+        <div class="body" id="scenarios-body">
+          <div class="bar">
+            <div class="left" id="scenarios-summary">Loading scenarios…</div>
+            <div><button id="run-all">Run all</button></div>
+          </div>
+          <div id="scenarios-list"></div>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const $ = (sel) => document.querySelector(sel);
+      const chatLog = $("#chat-log");
+      const chatInput = $("#chat-input");
+      const chatSend = $("#chat-send");
+      const pinSession = $("#pin-session");
+      const clearChat = $("#clear-chat");
+      const statusText = $("#status-text");
+      const statusEl = $("#status");
+      const scenariosList = $("#scenarios-list");
+      const scenariosSummary = $("#scenarios-summary");
+      const runAllBtn = $("#run-all");
+
+      // Active session key when "pin session" is on. Null means generate
+      // a fresh one per message.
+      let pinnedSessionKey = null;
+
+      function addMessage(role, text, meta) {
+        const div = document.createElement("div");
+        div.className = "msg " + role;
+        const who = document.createElement("div");
+        who.className = "who";
+        who.textContent = role === "user" ? "you" : role === "bot" ? "bot" : "";
+        const bubble = document.createElement("div");
+        bubble.className = "bubble";
+        bubble.textContent = text;
+        div.appendChild(who);
+        div.appendChild(bubble);
+        if (meta) {
+          const metaDiv = document.createElement("div");
+          metaDiv.className = "events";
+          for (const line of meta) {
+            const l = document.createElement("div");
+            l.textContent = line;
+            metaDiv.appendChild(l);
+          }
+          bubble.appendChild(metaDiv);
+        }
+        chatLog.appendChild(div);
+        chatLog.scrollTop = chatLog.scrollHeight;
+        return bubble;
+      }
+
+      async function loadStatus() {
+        try {
+          const res = await fetch("/api/status");
+          const data = await res.json();
+          if (data.connected) {
+            statusEl.className = "status ok";
+            statusText.textContent = data.gatewayUrl + "  |  agent: " + data.agentId;
+          } else {
+            statusEl.className = "status fail";
+            statusText.textContent = "not connected: " + (data.connectionError || "unknown error");
+          }
+        } catch (err) {
+          statusEl.className = "status fail";
+          statusText.textContent = "status check failed";
+        }
+      }
+
+      async function sendChat() {
+        const text = chatInput.value.trim();
+        if (!text) return;
+        chatInput.value = "";
+        chatSend.disabled = true;
+
+        addMessage("user", text);
+        const thinking = addMessage("bot", "thinking…");
+
+        const payload = { text };
+        if (pinSession.checked) {
+          if (!pinnedSessionKey) {
+            pinnedSessionKey = "agentprobe-web-" + Math.random().toString(36).slice(2, 12);
+          }
+          payload.sessionKey = pinnedSessionKey;
+        }
+
+        try {
+          const res = await fetch("/api/chat", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({ error: "HTTP " + res.status }));
+            thinking.textContent = "error: " + (err.error || "unknown");
+            return;
+          }
+          const data = await res.json();
+          thinking.textContent = data.text || "(empty reply)";
+          const eventSummary = (data.events || []).map(
+            (e) => "[" + e.offsetMs + "ms] " + e.type,
+          );
+          eventSummary.unshift("responseTimeMs: " + data.responseTimeMs);
+          const metaDiv = document.createElement("div");
+          metaDiv.className = "events";
+          for (const line of eventSummary) {
+            const l = document.createElement("div");
+            l.textContent = line;
+            metaDiv.appendChild(l);
+          }
+          thinking.appendChild(metaDiv);
+        } catch (err) {
+          thinking.textContent = "network error: " + err.message;
+        } finally {
+          chatSend.disabled = false;
+          chatInput.focus();
+        }
+      }
+
+      async function loadScenarios() {
+        try {
+          const res = await fetch("/api/scenarios");
+          const data = await res.json();
+          if (data.error) {
+            scenariosSummary.textContent = "load error: " + data.error;
+            return;
+          }
+          const items = data.scenarios || [];
+          scenariosSummary.textContent =
+            items.length + " scenario" + (items.length === 1 ? "" : "s") + " loaded";
+          scenariosList.innerHTML = "";
+          for (const s of items) {
+            scenariosList.appendChild(renderScenarioCard(s));
+          }
+        } catch (err) {
+          scenariosSummary.textContent = "load failed: " + err.message;
+        }
+      }
+
+      function renderScenarioCard(s) {
+        const card = document.createElement("div");
+        card.className = "scenario";
+        card.dataset.name = s.name;
+
+        const head = document.createElement("div");
+        head.className = "scenario-head";
+        const info = document.createElement("div");
+        info.innerHTML =
+          '<div class="name"></div><div class="desc"></div><div class="meta"></div>';
+        info.querySelector(".name").textContent = s.name;
+        info.querySelector(".desc").textContent = s.description || "";
+        info.querySelector(".meta").textContent =
+          s.stepCount + " step" + (s.stepCount === 1 ? "" : "s") +
+          " · " + s.assertionCount + " assertion" + (s.assertionCount === 1 ? "" : "s") +
+          " · session: " + s.session;
+        head.appendChild(info);
+
+        const runBtn = document.createElement("button");
+        runBtn.textContent = "Run";
+        runBtn.onclick = () => runScenario(card, s.name);
+        head.appendChild(runBtn);
+
+        card.appendChild(head);
+        return card;
+      }
+
+      async function runScenario(card, name) {
+        const btn = card.querySelector("button");
+        btn.disabled = true;
+        btn.textContent = "running…";
+        clearResult(card);
+
+        try {
+          const res = await fetch("/api/scenarios/" + encodeURIComponent(name), { method: "POST" });
+          const result = await res.json();
+          if (!res.ok) {
+            showError(card, result.error || "HTTP " + res.status);
+            return;
+          }
+          renderResult(card, result);
+        } catch (err) {
+          showError(card, err.message);
+        } finally {
+          btn.disabled = false;
+          btn.textContent = "Run again";
+        }
+      }
+
+      function clearResult(card) {
+        const existing = card.querySelector(".scenario-result");
+        if (existing) existing.remove();
+      }
+
+      function showError(card, msg) {
+        clearResult(card);
+        const div = document.createElement("div");
+        div.className = "scenario-result";
+        div.innerHTML = '<div class="error-banner"></div>';
+        div.querySelector(".error-banner").textContent = msg;
+        card.appendChild(div);
+      }
+
+      function renderResult(card, result) {
+        clearResult(card);
+        const div = document.createElement("div");
+        div.className = "scenario-result";
+
+        const verdictClass =
+          !result.passed ? "fail" : result.warningFailures > 0 ? "warn" : "pass";
+        const verdictText =
+          !result.passed ? "FAIL" : result.warningFailures > 0 ? "PASS (warnings)" : "PASS";
+        const summary = document.createElement("div");
+        summary.innerHTML =
+          '<span class="verdict ' + verdictClass + '">' + verdictText + "</span>" +
+          ' <span class="muted">· ' + result.durationMs + "ms · " +
+          result.criticalFailures + " critical · " +
+          result.warningFailures + " warnings</span>";
+        div.appendChild(summary);
+
+        for (const step of result.steps) {
+          const stepEl = document.createElement("div");
+          stepEl.className = "step " + (step.passed ? "pass" : "fail");
+          const name = document.createElement("div");
+          name.className = "name";
+          name.textContent =
+            step.name + "  (" + step.replyTimeMs + "ms, " + step.eventCount + " events)";
+          stepEl.appendChild(name);
+
+          const sendLine = document.createElement("div");
+          sendLine.className = "line";
+          sendLine.textContent = "send:  " + step.send;
+          stepEl.appendChild(sendLine);
+
+          const replyLine = document.createElement("div");
+          replyLine.className = "line";
+          replyLine.textContent = "reply: " + step.reply;
+          stepEl.appendChild(replyLine);
+
+          if (step.error) {
+            const err = document.createElement("div");
+            err.className = "line";
+            err.style.color = "var(--fail)";
+            err.textContent = "ERROR: " + step.error;
+            stepEl.appendChild(err);
+          }
+
+          for (const a of step.assertions) {
+            const aEl = document.createElement("div");
+            const klass = a.passed
+              ? "pass"
+              : a.severity === "warning"
+                ? "warn"
+                : "fail";
+            aEl.className = "assertion " + klass;
+            aEl.textContent = a.message;
+            stepEl.appendChild(aEl);
+          }
+
+          div.appendChild(stepEl);
+        }
+        card.appendChild(div);
+      }
+
+      async function runAll() {
+        runAllBtn.disabled = true;
+        runAllBtn.textContent = "running…";
+        const cards = Array.from(scenariosList.querySelectorAll(".scenario"));
+        for (const card of cards) {
+          await runScenario(card, card.dataset.name);
+        }
+        runAllBtn.disabled = false;
+        runAllBtn.textContent = "Run all";
+      }
+
+      chatSend.addEventListener("click", sendChat);
+      chatInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          sendChat();
+        }
+      });
+      clearChat.addEventListener("click", () => {
+        chatLog.innerHTML = "";
+        pinnedSessionKey = null;
+        addMessage("meta", "cleared.");
+      });
+      pinSession.addEventListener("change", () => {
+        if (!pinSession.checked) pinnedSessionKey = null;
+      });
+      runAllBtn.addEventListener("click", runAll);
+
+      loadStatus();
+      loadScenarios();
+    </script>
+  </body>
+</html>

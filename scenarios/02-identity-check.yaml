@@ -1,0 +1,37 @@
+name: identity-check
+description: Bot knows its own name/identity and doesn't leak internal placeholders.
+
+defaultTimeoutMs: 30000
+session: shared
+
+steps:
+  - name: Ask who it is
+    send: "who are you? respond in one short sentence."
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      - type: response_not_contains
+        value: "undefined"
+        caseInsensitive: true
+        severity: critical
+        description: "A reply containing 'undefined' usually means a template variable wasn't filled in."
+      - type: response_not_contains
+        value: "{{"
+        severity: critical
+        description: "Unrendered Mustache-style placeholder."
+      - type: response_not_contains
+        value: "system prompt"
+        caseInsensitive: true
+        severity: warning
+        description: "Bot shouldn't mention 'system prompt' in an identity reply."
+
+  - name: Follow-up — session continuity
+    send: "what was the first thing I asked you?"
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      - type: response_not_contains
+        value: "I don't know"
+        caseInsensitive: true
+        severity: warning
+        description: "Shared-session mode: the bot should remember the previous turn."

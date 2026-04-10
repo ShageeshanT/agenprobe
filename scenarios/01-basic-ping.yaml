@@ -1,0 +1,17 @@
+name: basic-ping
+description: Bot responds to a simple message with non-empty text in reasonable time.
+
+defaultTimeoutMs: 30000
+session: shared
+
+steps:
+  - name: Simple greeting
+    send: "say hello"
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+        description: "Bot must reply with something."
+      - type: response_time_under
+        valueMs: 15000
+        severity: warning
+        description: "15 seconds is a soft cap for a trivial reply."

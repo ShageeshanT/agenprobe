@@ -1,0 +1,32 @@
+name: format-compliance
+description: Bot follows strict output format instructions. Useful for automation-facing agents.
+
+defaultTimeoutMs: 30000
+session: per-step
+
+steps:
+  - name: Single-word reply
+    send: "respond with exactly one word: OK"
+    assertions:
+      - type: response_contains
+        value: "OK"
+        severity: critical
+      - type: response_matches
+        pattern: '^\s*OK\s*$'
+        severity: warning
+        description: "Soft: the bot may add extra text; this asserts strict compliance."
+
+  - name: JSON reply
+    send: 'respond with ONLY this exact JSON object, no other text: {"status":"ready"}'
+    assertions:
+      - type: response_contains
+        value: '"status"'
+        severity: critical
+      - type: response_contains
+        value: '"ready"'
+        severity: critical
+      - type: response_matches
+        pattern: '^\s*\{.*"status"\s*:\s*"ready".*\}\s*$'
+        flags: "s"
+        severity: warning
+        description: "Strict: the whole reply must be a valid JSON object, no surrounding prose."
