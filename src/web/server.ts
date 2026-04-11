@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import express, { type Request, type Response } from "express";
 
 import { HermesAdapter } from "../adapters/hermes-adapter.js";
+import { queryAgentDB } from "../adapters/openclaw-agentdb.js";
 import { OpenClawAdapter } from "../adapters/openclaw-adapter.js";
 import type { BotAdapter, BotReply } from "../core/bot-adapter.js";
 import { createReportStore, type ReportStore } from "../core/report-store.js";
@@ -12,7 +13,10 @@ import {
   loadScenariosForAdapter,
   ScenarioLoadError,
 } from "../core/scenario-loader.js";
-import { runScenario } from "../core/scenario-runner.js";
+import {
+  runScenario,
+  type PlatformHandlers,
+} from "../core/scenario-runner.js";
 import type { Scenario } from "../core/scenario.js";
 import {
   discoverOpenClawConfig,
@@ -111,6 +115,38 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<void>
   const runtime = new Map<AdapterKind, AdapterRuntime>();
   for (const entry of entries) {
     runtime.set(entry.kind, { entry, connected: false });
+  }
+
+  /**
+   * Build platform handlers for the given adapter kind based on the
+   * current process.env. Only OpenClaw gets AgentDB query support, and
+   * only when RAILWAY_PROJECT/ENVIRONMENT/SERVICE are all set.
+   */
+  function buildPlatformHandlers(kind: AdapterKind): PlatformHandlers {
+    if (kind !== "openclaw") return {};
+    const project = process.env.RAILWAY_PROJECT;
+    const environment = process.env.RAILWAY_ENVIRONMENT;
+    const service = process.env.RAILWAY_SERVICE;
+    if (!project || !environment || !service) return {};
+    const coords = { project, environment, service };
+    const agentId = process.env.OPENCLAW_AGENT_ID ?? "main";
+    return {
+      queryAgentDB: async (assertion) => {
+        try {
+          const result = await queryAgentDB({
+            coords,
+            agentId,
+            sql: assertion.sql,
+            ...(assertion.params ? { params: assertion.params } : {}),
+          });
+          return { rows: result.rows, rowCount: result.rowCount };
+        } catch (err) {
+          return {
+            error: err instanceof Error ? err.message : String(err),
+          };
+        }
+      },
+    };
   }
 
   /**
@@ -277,7 +313,9 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<void>
       }
       const adapter = await getOrConnect(rt);
       const startedAt = Date.now();
-      const result = await runScenario(adapter, scenario);
+      const result = await runScenario(adapter, scenario, {
+        platformHandlers: buildPlatformHandlers(kind),
+      });
       const durationMs = Date.now() - startedAt;
       // Persist so the Results tab can read the run back.
       try {
@@ -310,10 +348,13 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<void>
     try {
       const scenarios = loadScenariosForAdapter(scenarioDir, kind);
       const adapter = await getOrConnect(rt);
+      const handlers = buildPlatformHandlers(kind);
       const startedAt = Date.now();
       const results = [];
       for (const scenario of scenarios) {
-        results.push(await runScenario(adapter, scenario));
+        results.push(
+          await runScenario(adapter, scenario, { platformHandlers: handlers }),
+        );
       }
       const durationMs = Date.now() - startedAt;
       const passed = results.filter((r) => r.passed).length;

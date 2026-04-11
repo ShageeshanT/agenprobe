@@ -1,0 +1,47 @@
+name: agentdb-contacts-read
+description: Verify the AgentDB plugin is alive and the contacts table is populated. Read-only — does not mutate state. This is the smoke test for the agentdb_query assertion type itself as much as a test of E.C.H.O.
+
+defaultTimeoutMs: 60000
+session: per-step
+
+steps:
+  - name: AgentDB is reachable and contacts table has rows
+    send: "Say OK. Nothing more."
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+
+      - type: agentdb_query
+        sql: "SELECT COUNT(*) as n FROM contacts"
+        expectMinRows: 1
+        severity: critical
+        description: "AgentDB query must return a row even if the count is zero."
+
+      - type: agentdb_query
+        sql: "SELECT COUNT(*) as n FROM contacts WHERE is_active = 1"
+        severity: warning
+        description: "Soft check that the query machinery handles parameterised WHERE clauses."
+
+  - name: Schema registry lists the contacts plugin schema
+    send: "Say OK. Nothing more."
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+
+      - type: agentdb_query
+        sql: "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'contacts'"
+        expectRowCount: 1
+        severity: critical
+        description: "The contacts table must exist. If it doesn't, AgentDB plugin is broken."
+
+  - name: At least one contact has a primary phone
+    send: "Say OK. Nothing more."
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+
+      - type: agentdb_query
+        sql: "SELECT COUNT(*) as n FROM contacts WHERE primary_phone IS NOT NULL AND primary_phone != ''"
+        expectMinRows: 1
+        severity: warning
+        description: "Expected: at least one contact carries a primary_phone value. Softly enforced because a brand-new bot may have none."

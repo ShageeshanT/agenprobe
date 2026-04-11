@@ -63,7 +63,8 @@ export type Assertion =
   | ResponseTimeUnderAssertion
   | ResponseTimeOverAssertion
   | ResponseIsNonEmptyAssertion
-  | ResponseIsEmptyAssertion;
+  | ResponseIsEmptyAssertion
+  | AgentDBQueryAssertion;
 
 export type AssertionSeverity = "critical" | "warning" | "info";
 
@@ -107,6 +108,52 @@ export interface ResponseIsNonEmptyAssertion extends AssertionBase {
 
 export interface ResponseIsEmptyAssertion extends AssertionBase {
   type: "response_is_empty";
+}
+
+/**
+ * Assert on OpenClaw AgentDB state after a scenario step runs.
+ *
+ * Only meaningful when the scenario runs against an OpenClaw adapter
+ * connected via `railway ssh`. For other adapters (Hermes, future n8n,
+ * etc.) this assertion is automatically marked "skipped" with an
+ * explanatory message rather than failing the scenario.
+ *
+ * Example (all contacts with phone starting "+1555"):
+ *
+ *   - type: agentdb_query
+ *     sql: "SELECT * FROM contacts WHERE primary_phone LIKE ?"
+ *     params: ["+1555%"]
+ *     expectMinRows: 1
+ *     severity: critical
+ *
+ * Example (check a specific field on a specific row):
+ *
+ *   - type: agentdb_query
+ *     sql: "SELECT name FROM contacts WHERE primary_phone = ?"
+ *     params: ["+94766130939"]
+ *     expectRowCount: 1
+ *     expectFirstRow:
+ *       name: "Shagee"
+ *     severity: critical
+ */
+export interface AgentDBQueryAssertion extends AssertionBase {
+  type: "agentdb_query";
+  /** SQL SELECT / PRAGMA statement. Runs inside the container, read-only. */
+  sql: string;
+  /** Positional parameters bound to `?` placeholders in the SQL. */
+  params?: (string | number | boolean | null)[];
+  /** Require exactly this many rows. */
+  expectRowCount?: number;
+  /** Require at least this many rows. */
+  expectMinRows?: number;
+  /** Require at most this many rows. */
+  expectMaxRows?: number;
+  /**
+   * Require each listed field on the FIRST row to equal the given value.
+   * Loose equality (string/number coercion). Ignored when the query
+   * returned zero rows.
+   */
+  expectFirstRow?: Record<string, string | number | boolean | null>;
 }
 
 // -------- Results --------

@@ -195,20 +195,48 @@ export interface OpenClawDiscovered {
 export async function discoverOpenClawConfig(
   coords: RailwayCoordinates,
 ): Promise<OpenClawDiscovered> {
+  // Determine the runtime agent id by looking at what the gateway has
+  // actually CREATED on disk, rather than what's declared in
+  // openclaw.json. The agentdb plugin writes one file per agent at
+  // ~/.openclaw/agentdb-<agentId>.sqlite, so whatever files exist there
+  // are the real runtime agent names. "main" is the gateway's hardcoded
+  // default — openclaw.json may carry a different key like "defaults"
+  // which is a *config template*, not an agent id.
+  //
+  // We pipe the JS through a quoted heredoc temp file to sidestep the
+  // single-quote-in-SQL/JS hell inside `node -e '...'` over an ssh tunnel.
   const script = `
-node -e '
+cat > /tmp/agentprobe-discover.js <<'DISCOVER_EOF'
 const fs = require("fs");
+const path = require("path");
 const cfg = JSON.parse(fs.readFileSync("/data/.openclaw/openclaw.json", "utf8"));
 const gatewayToken = cfg.gateway && cfg.gateway.auth && cfg.gateway.auth.token;
 const domain = process.env.RAILWAY_PUBLIC_DOMAIN;
 const gatewayUrl = domain ? "https://" + domain : null;
-const agents = cfg.agents ? Object.keys(cfg.agents) : ["main"];
-const agentId = agents.includes("main") ? "main" : (agents[0] || "main");
+
+// Scan the agentdb directory for real runtime agent ids.
+let agentId = "main";
+try {
+  const home = process.env.HOME || "/home/openclaw";
+  const dir = path.join(home, ".openclaw");
+  const files = fs.readdirSync(dir);
+  const dbFiles = files
+    .filter((f) => f.startsWith("agentdb-") && f.endsWith(".sqlite"))
+    .map((f) => f.slice("agentdb-".length, -".sqlite".length));
+  if (dbFiles.length > 0) {
+    agentId = dbFiles.includes("main") ? "main" : dbFiles[0];
+  }
+} catch (err) {
+  // Fall through with "main" default.
+}
+
 const out = { gatewayUrl, gatewayToken, agentId };
 if (!gatewayUrl) throw new Error("RAILWAY_PUBLIC_DOMAIN not set in container env");
 if (!gatewayToken) throw new Error("gateway.auth.token missing from openclaw.json");
 console.log("AGENTPROBE_DISCOVERY_JSON=" + JSON.stringify(out));
-'
+DISCOVER_EOF
+node /tmp/agentprobe-discover.js
+rm -f /tmp/agentprobe-discover.js
 `.trim();
 
   const { stdout, stderr, code } = await runRemoteCommand(coords, script, 30_000);
