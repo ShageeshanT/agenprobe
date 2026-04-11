@@ -1,11 +1,12 @@
 /**
  * The minimum contract every bot adapter implements.
  *
- * Intentionally small: OpenClaw, Hermes, and n8n are three very different
- * platforms, and this interface is the lowest common denominator across them.
- * Platform-specific capabilities (AgentDB reads, workflow-execution inspection,
- * tool call tracing, etc.) live on the concrete adapter classes and scenarios
- * opt into them via type narrowing, not via a fake-generic superclass.
+ * Intentionally small: OpenClaw and Hermes are two very different platforms
+ * (WebSocket RPC + device attestation vs. SSH shell-out) and this interface
+ * is the lowest common denominator across them. Platform-specific
+ * capabilities (AgentDB reads, Hermes memory introspection, tool call
+ * tracing, etc.) live on the concrete adapter classes and scenarios opt
+ * into them via type narrowing, not via a fake-generic superclass.
  */
 export interface BotAdapter {
   /** Human-readable name for logs and reports. */

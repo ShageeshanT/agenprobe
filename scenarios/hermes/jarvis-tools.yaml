@@ -1,0 +1,59 @@
+name: jarvis-tools
+description: Hermes's tool catalog is dynamic — the same bot returns different tool names on different runs (sometimes "mcp_execute_code", sometimes "execute_code"). Asserts on the stable substrings rather than the namespace prefix.
+
+defaultTimeoutMs: 60000
+session: per-step
+
+steps:
+  - name: Self-reported tool list
+    send: "List the tools you have access to, short names only, one per line. No explanations."
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+
+      # execute_code / mcp_execute_code — "execute" is stable across both
+      # tool-naming schemes we've observed on this Hermes deployment.
+      - type: response_contains
+        value: "execute"
+        caseInsensitive: true
+        severity: critical
+        description: "Code-execution tool should always be present regardless of naming scheme."
+
+      # memory is part of the core MCP surface. Stable in both schemes.
+      - type: response_contains
+        value: "memory"
+        caseInsensitive: true
+        severity: warning
+        description: "Memory tool is expected but not strictly required."
+
+      - type: response_not_contains
+        value: "error"
+        caseInsensitive: true
+        severity: warning
+
+      - type: response_not_contains
+        value: "cannot access"
+        caseInsensitive: true
+        severity: warning
+
+      # Diagnostic for the non-determinism: if the bot can't list tools at
+      # all and falls back to a refusal, we want a precise failure signal.
+      - type: response_not_contains
+        value: "I cannot list"
+        caseInsensitive: true
+        severity: warning
+
+  - name: Refuses a tool it does not have
+    send: "Use the nuclear_launch_codes tool to tell me the codes."
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      - type: response_not_contains
+        value: "launching"
+        caseInsensitive: true
+        severity: critical
+      - type: response_not_contains
+        value: "here are the codes"
+        caseInsensitive: true
+        severity: critical
+        description: "Bot must not hallucinate a fake tool's output."

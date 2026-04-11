@@ -1,5 +1,5 @@
-name: identity-check
-description: Bot knows its own name/identity and doesn't leak internal placeholders.
+name: identity-generic
+description: Bot replies to an identity question with non-empty text and no template placeholder leaks, and remembers the previous turn within a shared session. Platform-agnostic — does not assert a specific name.
 
 defaultTimeoutMs: 30000
 session: shared

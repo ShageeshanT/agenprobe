@@ -2,9 +2,9 @@
 
 A QA / smoke-test harness for AI agent platforms.
 
-AgentProbe lets you send messages to a bot built on OpenClaw, Hermes Agent, or
-n8n and assert on what the bot actually does — the reply, the latency, the
-tools it called, the state it touched. Same test, any platform.
+AgentProbe lets you send messages to a bot built on OpenClaw or Hermes Agent
+and assert on what the bot actually does — the reply, the latency, the tools
+it called, the state it touched. Same test, any supported platform.
 
 You point it at a bot, it runs a scenario, you get a report.
 
@@ -19,28 +19,34 @@ What works today:
 - **OpenClaw adapter** — connects to any self-hosted OpenClaw instance over
   its native WebSocket RPC, completes the device-attested handshake, sends a
   chat message, waits for the run to finish, returns the reply text.
-- **Smoke test** — one command, sends a message to your bot, prints the reply
-  and the stream of intermediate events.
-- **Device pairing** — generate an Ed25519 keypair, register the public key
-  in the gateway's paired-device store, authenticate subsequent connections
-  with real device signatures.
+- **Hermes adapter** — shells out to `hermes chat -q ... -Q --source tool`
+  over `railway ssh`, captures the quiet-mode reply, maintains session
+  continuity via Hermes's own session IDs.
+- **Device pairing (OpenClaw)** — generate an Ed25519 keypair, register the
+  public key in the gateway's paired-device store, authenticate subsequent
+  connections with real device signatures.
 - **Scenario engine** — YAML test scenarios with multi-step conversations,
   session continuity, seven assertion types, per-step timeouts, and
-  severity levels (critical / warning / info).
-- **CLI scenario runner** — `npm run scenarios` executes every YAML in
-  `scenarios/` against the live bot and prints a readable pass/fail report.
-  Exit code 0/1 so it drops straight into CI.
-- **Web dashboard** — single-page UI at `http://localhost:4000` with live
-  chat (pin session across messages), a scenario browser with one-click
-  run and run-all, and per-assertion pass/fail display.
+  severity levels (critical / warning / info). Scenarios are organised by
+  platform: `scenarios/common/` runs against every adapter, while
+  `scenarios/openclaw/` and `scenarios/hermes/` hold platform-specific
+  tests for E.C.H.O. and Jarvis respectively.
+- **CLI scenario runner** — `npm run scenarios` (OpenClaw) or
+  `npx tsx scripts/run-scenario.ts scenarios --adapter hermes` runs the
+  right suite for the chosen adapter and prints a readable pass/fail
+  report. Exit code 0/1 so it drops straight into CI.
+- **Web dashboard** — single-page UI at `http://localhost:4000` with an
+  adapter picker in the topbar (OpenClaw / Hermes), live chat with session
+  pinning, a scenario browser with one-click run and run-all, and
+  per-assertion pass/fail display. Hermes is connected lazily on first use
+  to avoid paying the SSH preflight cost when you're not using it.
 
 What is not built yet:
 
-- Hermes Agent adapter.
-- n8n adapter.
 - A proper CLI (`agentprobe init`, `agentprobe run`, etc.) — today's entry
   points are scripts under `scripts/`.
-- Multi-profile / multi-environment configuration.
+- Run history / report persistence (the Results tab still shows placeholders).
+- Multi-profile / multi-environment configuration (one `.env` per install).
 - Reporting exports (JUnit, HTML).
 - Scenario authoring UI (you write YAML by hand for now).
 
@@ -54,10 +60,10 @@ Testing agentic systems is hard because the interesting behaviour lives at the
 seams: routing, tool calls, scheduled jobs, multi-actor conversations,
 connector side-effects. Traditional test frameworks only see the final reply.
 AgentProbe is a dedicated client that speaks each platform's real transport
-(WebSocket for OpenClaw, HTTP for Hermes/n8n), impersonates a user, captures
-every intermediate event the bot emits, and lets you write assertions against
-any of it. The goal is one scenario file that runs identically against three
-different agent platforms.
+(WebSocket RPC for OpenClaw, SSH shell-out for Hermes), impersonates a user,
+captures every intermediate event the bot emits, and lets you write
+assertions against any of it. The goal is one scenario file that runs
+identically against every supported bot.
 
 ---
 
@@ -65,7 +71,7 @@ different agent platforms.
 
 ```
 ┌─────────────────────┐
-│  Your scenario      │   (YAML + assertions — MVP-1)
+│  Your scenario      │   (YAML + assertions)
 └──────────┬──────────┘
            │ sendMessage("hi", { sessionKey: "..." })
            ▼
@@ -74,19 +80,19 @@ different agent platforms.
 │  (generic)          │     connect / sendMessage / disconnect
 └──────────┬──────────┘
            │ polymorphic dispatch
-   ┌───────┼──────────┬──────────┐
-   ▼       ▼          ▼          ▼
-┌──────┐ ┌──────┐ ┌──────┐ ┌──────────┐
-│OpenC │ │Hermes│ │ n8n  │ │  other   │
-│ WS   │ │ HTTP │ │ hook │ │  future  │
-└──────┘ └──────┘ └──────┘ └──────────┘
+      ┌────┴────┐
+      ▼         ▼
+ ┌─────────┐ ┌─────────┐
+ │OpenClaw │ │ Hermes  │
+ │ WS RPC  │ │ SSH CLI │
+ └─────────┘ └─────────┘
 ```
 
 The `BotAdapter` interface is intentionally minimal — `connect`,
 `sendMessage`, `disconnect`. Platform-specific capabilities (OpenClaw's
-AgentDB, n8n's workflow-execution introspection, Hermes's memory, etc.) live
-on the concrete adapters and are opt-in per scenario. We do not try to force
-three very different platforms behind a fake-generic superclass.
+AgentDB, Hermes's memory/skills introspection, tool-call tracing, etc.)
+live on the concrete adapters and are opt-in per scenario. We do not try
+to force two very different platforms behind a fake-generic superclass.
 
 For OpenClaw specifically, "sendMessage" is not a single HTTP POST. It's a
 five-step dance with an Ed25519-signed handshake, a streamed event log, and
@@ -799,65 +805,46 @@ AgenProbe/
 
 ## Roadmap
 
-### MVP-1 — more adapters, same interface
+### Next
 
-- **Hermes Agent adapter.** Hermes (from Nous Research) is architecturally
-  similar to OpenClaw — same "one bot, many channels" model, same
-  self-improving agent concept, comparable RPC surface. The adapter should
-  reuse the `BotAdapter` interface verbatim. Recon milestone before code:
-  what transport does Hermes expose, what's its auth model, what's its
-  chat-send equivalent.
-- **n8n adapter.** Simplest of the three: an n8n "bot" is a workflow with a
-  Webhook or Chat Trigger node. The adapter POSTs to the webhook URL, parses
-  the JSON response, and is done in ~50 lines.
-- Once two more adapters exist, the `BotAdapter` interface has earned the
-  right to exist. Until then it's speculative abstraction.
+- **Run history / persistent reports.** Save every `npm run scenarios`
+  run to `reports/<timestamp>-<adapter>.json` and wire the dashboard's
+  Results tab to real aggregate data (pass rate over time, average
+  latency, which scenarios are flakiest). Closes the loop on the
+  placeholders currently shown there.
+- **Single-command `agentprobe init openclaw "<railway ssh command>"`**
+  — parse SSH command, discover URL/token/agent ID, generate key, pair,
+  write `.env`, run smoke test. One command from a fresh OpenClaw
+  instance to a working test harness.
+- **Fix the Windows shell-quoting bug in `scripts/pair-openclaw.ts`** so
+  the pairing flow doesn't need the manual base64 workaround documented
+  in Setup.
 
-### MVP-2 — scenario engine
+### Later
 
-- YAML scenarios with `send` and `wait_for` steps, loaded via
-  `agentprobe run scenarios/foo.yaml`.
-- Assertions: `response_contains`, `response_not_contains`,
-  `response_time_under`, `response_matches` (regex).
-- Session continuity across steps (persistent `sessionKey`).
-- Structured JSON output.
-
-### MVP-3 — onboarding polish
-
-- `agentprobe init openclaw "<railway ssh command>"` single-command setup:
-  parse SSH command, discover URL/token/agent ID, generate key, pair, write
-  `.env`, run smoke test. See the "fresh-account onboarding" discussion in
-  the design notes.
-- Multi-profile support (`environments/<name>.yaml`) so you can test more
-  than one bot from one install.
-- Fix the Windows shell-quoting bug in `pair-openclaw.ts`.
-
-### Later, once the above is solid
-
-- Scenario templates (`lead-nurturing.yaml`, `customer-support.yaml`, etc.).
+- Scenario templates for common bot shapes (lead nurturing, customer
+  support, appointment booking).
 - Report export: JUnit XML for CI, HTML for humans.
-- Adversarial scenarios (prompt injection, role confusion, data extraction
-  attempts).
-- AI-driven virtual users (Claude API personas that react to the bot's
-  replies instead of following a fixed script).
+- Adversarial scenarios beyond the current four (role confusion, data
+  extraction via nested instructions, prompt injection in tool outputs).
+- AI-driven virtual users: Claude API personas that react to the bot's
+  replies instead of following a scripted turn list.
 - Platform-specific extensions:
   - OpenClaw: AgentDB assertions (contact created, score updated, custom
     table writes), cron-job injection for time-travel testing, tool-call
     tracing.
-  - n8n: execution-inspection assertions via n8n's API (which node fired,
-    with what inputs, in what order).
-  - Hermes: memory / skill assertions.
+  - Hermes: memory / skill introspection, session history assertions.
 - Connector proxy: intercept and mock Composio calls to test
   Gmail/Sheets/Calendar integrations without touching real accounts.
-- A web dashboard for running scenarios and browsing reports.
+- Multi-profile support (`environments/<name>.yaml`) so you can test more
+  than one bot of each platform from a single install.
 
 ### Deferred indefinitely
 
-- Mode C "live passthrough" (injecting tagged test messages into real
-  production WhatsApp/Telegram channels). Different product, different risk
-  profile.
-- A hosted SaaS version of AgentProbe. Not interesting until the CLI version
-  is solid.
+- Live passthrough (injecting tagged test messages into real production
+  WhatsApp/Telegram channels). Different product, different risk profile.
+- A hosted SaaS version of AgentProbe. Not interesting until the CLI
+  version is solid.
 
 ---
 
@@ -870,8 +857,6 @@ AgenProbe/
   that sits in front of the gateway on Railway.
 - **Hermes Agent:** <https://github.com/NousResearch/hermes-agent> and
   <https://hermes-agent.nousresearch.com/docs/>.
-- **n8n:** <https://docs.n8n.io/> — workflow API is well-documented, the
-  execution-data endpoints will be particularly useful for the adapter.
 - **Ed25519 in Node:** <https://nodejs.org/api/crypto.html> — see
   `generateKeyPairSync("ed25519")` and `sign(null, data, key)` for the exact
   APIs AgentProbe uses.

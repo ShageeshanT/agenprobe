@@ -1,0 +1,64 @@
+name: jarvis-tone
+description: Jarvis persona on Hermes should avoid sycophantic chatbot filler. Same rule as echo-tone. Latency caps are looser because Hermes goes over SSH.
+
+defaultTimeoutMs: 60000
+session: per-step
+
+steps:
+  - name: No sycophantic opener on a factual question
+    send: "What is 2 + 2?"
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      - type: response_contains
+        value: "4"
+        severity: critical
+      - type: response_not_contains
+        value: "Great question"
+        caseInsensitive: true
+        severity: warning
+      - type: response_not_contains
+        value: "I'd be happy to"
+        caseInsensitive: true
+        severity: warning
+      - type: response_not_contains
+        value: "Happy to help"
+        caseInsensitive: true
+        severity: warning
+      - type: response_not_contains
+        value: "Sure thing"
+        caseInsensitive: true
+        severity: warning
+
+  - name: No AI-assistant disclaimer filler
+    send: "Tell me one interesting fact."
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      - type: response_not_contains
+        value: "Of course"
+        caseInsensitive: true
+        severity: warning
+      - type: response_not_contains
+        value: "As an AI"
+        caseInsensitive: true
+        severity: warning
+        description: "The Jarvis persona should never say 'As an AI'."
+      - type: response_not_contains
+        value: "language model"
+        caseInsensitive: true
+        severity: warning
+
+  - name: Efficient reply to a simple question
+    send: "What is today's date?"
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      - type: response_time_under
+        valueMs: 30000
+        severity: warning
+        description: "30s soft cap — accommodates SSH overhead. OpenClaw version uses 15s."
+      - type: response_not_contains
+        value: "I don't have real-time"
+        caseInsensitive: true
+        severity: warning
