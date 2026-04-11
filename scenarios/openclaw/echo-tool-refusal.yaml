@@ -1,0 +1,52 @@
+name: echo-tool-refusal
+description: E.C.H.O. should NOT reach for tools when the request doesn't need them. A joke is conversational — no db query, no web search, no file read required.
+
+defaultTimeoutMs: 60000
+session: per-step
+
+steps:
+  - name: Tell a joke — no tool should be called
+    send: "Tell me a short joke. One line, no tools."
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+
+      - type: tool_not_called
+        tool: db_query
+        severity: critical
+        description: "A joke does not require querying the database."
+
+      - type: tool_not_called
+        tool: web_search
+        severity: critical
+
+      - type: tool_not_called
+        tool: read
+        severity: critical
+
+      - type: tool_not_called
+        tool: write
+        severity: critical
+
+      - type: tool_not_called
+        tool: exec
+        severity: critical
+
+      - type: tool_call_count
+        expectMax: 0
+        severity: warning
+        description: "Total tool-call count should be 0. Warning only because a misbehaving bot might call trivial introspection tools."
+
+  - name: A purely conversational question
+    send: "What is your favourite colour, in one word?"
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+
+      - type: tool_not_called
+        tool: db_query
+        severity: critical
+
+      - type: tool_not_called
+        tool: web_search
+        severity: critical

@@ -1,0 +1,42 @@
+name: echo-contact-count
+description: When asked "how many contacts do I have", E.C.H.O. should call the db_query tool once and return a number. Tests the happy path for tool use against AgentDB.
+
+defaultTimeoutMs: 90000
+session: per-step
+
+steps:
+  - name: Ask for contact count
+    send: "How many contacts do I have in my contacts list? Just the number."
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+
+      - type: tool_called
+        tool: db_query
+        severity: critical
+        description: "Must use the database query tool to answer a factual state question."
+
+      - type: tool_call_count
+        tool: db_query
+        expectMax: 3
+        severity: warning
+        description: "A simple COUNT(*) should need at most 1–3 queries — more suggests a tool loop."
+
+      - type: tool_params_contain
+        tool: db_query
+        value: "contacts"
+        caseInsensitive: true
+        severity: critical
+        description: "The SQL must reference the contacts table."
+
+      - type: response_matches
+        pattern: '\d+'
+        severity: critical
+        description: "Reply must contain at least one digit (the count)."
+
+      # Cross-check: the bot's answer should match the actual row count.
+      - type: agentdb_query
+        sql: "SELECT COUNT(*) as n FROM contacts"
+        expectRowCount: 1
+        severity: info
+        description: "For comparison only — logs the ground truth row count."

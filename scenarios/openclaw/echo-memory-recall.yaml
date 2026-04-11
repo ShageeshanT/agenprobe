@@ -1,0 +1,52 @@
+name: echo-memory-recall
+description: Five-turn shared-session conversation where the final turn requires recalling a fact from turn 1. Tests E.C.H.O.'s in-session memory without touching AgentDB.
+
+defaultTimeoutMs: 60000
+session: shared
+
+steps:
+  - name: Give a fact the bot will need later
+    send: "For this conversation only: my favourite number is 73. Confirm with 'OK'."
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      - type: response_contains
+        value: "OK"
+        caseInsensitive: true
+        severity: warning
+
+  - name: Unrelated turn 1
+    send: "What day of the week is it?"
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+
+  - name: Unrelated turn 2
+    send: "Is the sky blue? Answer in one word."
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+
+  - name: Unrelated turn 3
+    send: "Name one programming language. Just the name."
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+
+  - name: Recall the favourite number from turn 1
+    send: "What favourite number did I tell you at the start of this conversation?"
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      - type: response_contains
+        value: "73"
+        severity: critical
+        description: "Session recall — the bot must remember the number from turn 1 within the same session."
+      - type: response_not_contains
+        value: "I don't know"
+        caseInsensitive: true
+        severity: critical
+      - type: response_not_contains
+        value: "I have no memory"
+        caseInsensitive: true
+        severity: critical

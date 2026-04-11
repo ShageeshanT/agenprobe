@@ -64,7 +64,11 @@ export type Assertion =
   | ResponseTimeOverAssertion
   | ResponseIsNonEmptyAssertion
   | ResponseIsEmptyAssertion
-  | AgentDBQueryAssertion;
+  | AgentDBQueryAssertion
+  | ToolCalledAssertion
+  | ToolNotCalledAssertion
+  | ToolCallCountAssertion
+  | ToolParamsContainAssertion;
 
 export type AssertionSeverity = "critical" | "warning" | "info";
 
@@ -154,6 +158,58 @@ export interface AgentDBQueryAssertion extends AssertionBase {
    * returned zero rows.
    */
   expectFirstRow?: Record<string, string | number | boolean | null>;
+}
+
+/**
+ * Assert that the bot invoked a specific tool at least once during the
+ * current step. Matches on the tool NAME (OpenClaw's `agent`-stream
+ * `tool` events carry `data.name`). Case-sensitive by default.
+ */
+export interface ToolCalledAssertion extends AssertionBase {
+  type: "tool_called";
+  /** Tool name to match on. e.g. "db_query", "web_search". */
+  tool: string;
+}
+
+/**
+ * Inverse of ToolCalledAssertion. Asserts the bot DID NOT call a tool
+ * with this name. Useful for refusal tests — "when asked X, don't
+ * invoke tool Y" — and for hallucination guards.
+ */
+export interface ToolNotCalledAssertion extends AssertionBase {
+  type: "tool_not_called";
+  tool: string;
+}
+
+/**
+ * Assert a bound on how many times a specific tool was called. Helps
+ * catch tool-call loops (where the bot gets stuck calling the same tool
+ * 10+ times without converging) and under-use (where the bot should
+ * have called a tool but hallucinated instead).
+ */
+export interface ToolCallCountAssertion extends AssertionBase {
+  type: "tool_call_count";
+  /** Tool name. Omit to count total tool calls regardless of name. */
+  tool?: string;
+  /** Require exactly this many calls. */
+  expectCount?: number;
+  /** Require at least this many calls. */
+  expectMin?: number;
+  /** Require at most this many calls. */
+  expectMax?: number;
+}
+
+/**
+ * Assert that at least one invocation of a tool was called with args
+ * whose JSON-stringified form contains a specific substring. Rough but
+ * effective for "was the query parameterised correctly" / "did the
+ * email recipient field get the right address" checks.
+ */
+export interface ToolParamsContainAssertion extends AssertionBase {
+  type: "tool_params_contain";
+  tool: string;
+  value: string;
+  caseInsensitive?: boolean;
 }
 
 // -------- Results --------

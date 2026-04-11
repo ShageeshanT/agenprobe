@@ -1,0 +1,55 @@
+name: echo-contact-lookup-loop
+description: |
+  Regression test for a bot-side bug observed on 2026-04-11: when asked to
+  find a contact by a phone-number prefix, E.C.H.O. gets stuck in a
+  tool-call loop. It issues 10+ variations of SELECT against contacts /
+  contact_phones (adjusting JOINs, CASTs, schemas) without converging on
+  an answer, eventually hitting the step timeout.
+
+  This scenario expects the tool-call count to stay under a soft ceiling
+  AND for the reply to include an actual name. Both fail on the broken
+  behaviour, making the regression visible over time.
+
+  Kept at warning severity so it surfaces without failing the suite —
+  the bot-side fix is not AgentProbe's responsibility.
+
+defaultTimeoutMs: 90000
+session: per-step
+
+steps:
+  - name: Find a contact whose phone starts with +9476
+    send: "Find the contact whose phone number starts with +9476. Tell me just their display name, nothing else."
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+
+      - type: tool_called
+        tool: db_query
+        severity: critical
+        description: "A factual lookup must hit the database."
+
+      - type: tool_call_count
+        tool: db_query
+        expectMax: 5
+        severity: warning
+        description: "Under 5 queries for a single phone-prefix lookup. More than that is the observed loop bug."
+
+      - type: response_not_contains
+        value: "I could not find"
+        caseInsensitive: true
+        severity: warning
+        description: "The contact exists (verified via agentdb_query below) — saying 'not found' is a regression."
+
+      - type: response_not_contains
+        value: "SELECT"
+        severity: warning
+        description: "Bot should return the name, not a SQL query."
+
+      # Ground truth: confirm the contact the bot was supposed to find
+      # actually exists. This is the proof that 'not found' responses are
+      # a bot bug, not a missing row.
+      - type: agentdb_query
+        sql: "SELECT COUNT(*) as n FROM contact_phones WHERE phone LIKE '+9476%'"
+        expectMinRows: 1
+        severity: info
+        description: "Diagnostic — logs whether the row actually exists in AgentDB."
