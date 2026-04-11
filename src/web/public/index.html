@@ -651,49 +651,41 @@
 
       <!-- 5: RESULTS -->
       <div class="panel" id="p5">
-        <div class="sh">
-          <h2>Test report</h2>
-          <p>Aggregate report across all scenarios. Exports to JSON and JUnit XML for CI.</p>
-        </div>
-        <div class="preview-banner">
-          <b>Preview</b> — the numbers shown below are illustrative. Real report aggregation ships in MVP-2.
+        <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px">
+          <div class="sh" style="margin-bottom: 0">
+            <h2>Run history</h2>
+            <p id="resSub">Aggregate across every saved run for the current adapter.</p>
+          </div>
+          <button class="btn btn-ghost" onclick="loadHistory()">Refresh</button>
         </div>
         <div class="stats-row" style="grid-template-columns: repeat(4, 1fr)">
-          <div class="stat"><div class="stat-n">—</div><div class="stat-l">Pass rate</div></div>
-          <div class="stat"><div class="stat-n">—</div><div class="stat-l">Avg response</div></div>
-          <div class="stat"><div class="stat-n">—</div><div class="stat-l">Critical fails</div></div>
-          <div class="stat"><div class="stat-n">—</div><div class="stat-l">Warnings</div></div>
+          <div class="stat"><div class="stat-n" id="resPassRate">—</div><div class="stat-l">Pass rate</div></div>
+          <div class="stat"><div class="stat-n" id="resAvgLatency">—</div><div class="stat-l">Avg step latency</div></div>
+          <div class="stat"><div class="stat-n" id="resTotalRuns">—</div><div class="stat-l">Runs</div></div>
+          <div class="stat"><div class="stat-n" id="resTotalScenarios">—</div><div class="stat-l">Scenarios</div></div>
         </div>
         <div class="res-grid">
           <div class="res-block">
-            <div class="res-title">Bot responses</div>
-            <div class="res-row"><span class="res-k">Messages tested</span><span class="res-v">—</span></div>
-            <div class="res-row"><span class="res-k">Avg response time</span><span class="res-v">—</span></div>
-            <div class="res-row"><span class="res-k">Empty replies</span><span class="res-v">—</span></div>
-            <div class="res-row"><span class="res-k">Latency SLO hits</span><span class="res-v">—</span></div>
+            <div class="res-title">Aggregate</div>
+            <div class="res-row"><span class="res-k">Passed</span><span class="res-v" id="resPassed">—</span></div>
+            <div class="res-row"><span class="res-k">Warned</span><span class="res-v" id="resWarned">—</span></div>
+            <div class="res-row"><span class="res-k">Failed</span><span class="res-v" id="resFailed">—</span></div>
+            <div class="res-row"><span class="res-k">Avg run duration</span><span class="res-v" id="resAvgDuration">—</span></div>
+            <div class="res-row"><span class="res-k">First run</span><span class="res-v" id="resFirstRun">—</span></div>
+            <div class="res-row"><span class="res-k">Last run</span><span class="res-v" id="resLastRun">—</span></div>
           </div>
           <div class="res-block">
-            <div class="res-title">Session continuity</div>
-            <div class="res-row"><span class="res-k">Multi-step scenarios</span><span class="res-v">—</span></div>
-            <div class="res-row"><span class="res-k">Session recall hits</span><span class="res-v">—</span></div>
-            <div class="res-row"><span class="res-k">Cross-turn drift</span><span class="res-v">—</span></div>
-          </div>
-          <div class="res-block">
-            <div class="res-title">Safety</div>
-            <div class="res-row"><span class="res-k">Placeholder leaks</span><span class="res-v">—</span></div>
-            <div class="res-row"><span class="res-k">Internal-ref leaks</span><span class="res-v">—</span></div>
-            <div class="res-row"><span class="res-k">Refusals (expected)</span><span class="res-v">—</span></div>
-          </div>
-          <div class="res-block">
-            <div class="res-title">Connectors</div>
-            <div class="res-row"><span class="res-k">Total actions</span><span class="res-v">—</span></div>
-            <div class="res-row"><span class="res-k">Passed</span><span class="res-v">—</span></div>
-            <div class="res-row"><span class="res-k">Failed</span><span class="res-v">—</span></div>
+            <div class="res-title">Flakiest scenarios</div>
+            <div id="resFlakiest" style="font-size: 12px; line-height: 1.8">
+              <div class="muted" style="color: var(--g400)">No runs yet — use the Tests tab or run <span style="font-family: var(--mono)">npm run scenarios</span> from the CLI to populate history.</div>
+            </div>
           </div>
         </div>
-        <div style="display: flex; gap: 10px">
-          <button class="btn btn-dark btn-full" disabled>Export JSON</button>
-          <button class="btn btn-ghost btn-full" disabled>Export JUnit</button>
+        <div class="card" style="padding: 0; margin-top: 20px">
+          <div style="padding: 14px 20px; border-bottom: 1px solid var(--g150); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px; color: var(--g400)">
+            Recent runs
+          </div>
+          <div id="resRunList"></div>
         </div>
       </div>
     </div>
@@ -765,12 +757,14 @@
         //   - chat sessions (bots don't share conversation state)
         //   - scenario list (platform-specific suites differ)
         //   - status pill
+        //   - results tab (history is per-adapter)
         sessions = [];
         initSessions();
         $("#connPill").textContent = "connecting…";
         $("#connPill").className = "conn-pill";
         await loadStatus();
         await loadScenarios();
+        await loadHistory();
       }
 
       async function loadStatus() {
@@ -1174,6 +1168,153 @@
         $("#sF").textContent = f;
       }
 
+      // ---------- run history (Results tab) ----------
+      let historyLoadInFlight = false;
+
+      async function loadHistory() {
+        if (historyLoadInFlight) return;
+        historyLoadInFlight = true;
+        try {
+          const res = await fetch("/api/history" + adapterQuery() + "&limit=50");
+          const data = await res.json();
+          if (data.error) {
+            $("#resSub").textContent = "history load error: " + data.error;
+            return;
+          }
+          renderAggregate(data.aggregate);
+          renderRunList(data.runs || []);
+        } catch (err) {
+          $("#resSub").textContent = "history load failed: " + err.message;
+        } finally {
+          historyLoadInFlight = false;
+        }
+      }
+
+      function renderAggregate(a) {
+        if (!a || a.totalRuns === 0) {
+          $("#resPassRate").textContent = "—";
+          $("#resAvgLatency").textContent = "—";
+          $("#resTotalRuns").textContent = "0";
+          $("#resTotalScenarios").textContent = "0";
+          $("#resPassed").textContent = "—";
+          $("#resWarned").textContent = "—";
+          $("#resFailed").textContent = "—";
+          $("#resAvgDuration").textContent = "—";
+          $("#resFirstRun").textContent = "—";
+          $("#resLastRun").textContent = "—";
+          $("#resFlakiest").innerHTML =
+            '<div class="muted" style="color: var(--g400)">No runs yet — use the Tests tab or run <span style="font-family: var(--mono)">npm run scenarios</span> from the CLI to populate history.</div>';
+          $("#resSub").textContent =
+            "Aggregate across every saved run for " + currentAdapter + ". Empty — no runs yet.";
+          return;
+        }
+        $("#resPassRate").textContent = a.passRatePct.toFixed(1) + "%";
+        $("#resAvgLatency").textContent = formatMs(a.avgStepLatencyMs);
+        $("#resTotalRuns").textContent = a.totalRuns;
+        $("#resTotalScenarios").textContent = a.totalScenarios;
+        $("#resPassed").textContent = a.passedScenarios;
+        $("#resWarned").textContent = a.warnedScenarios;
+        $("#resFailed").textContent = a.failedScenarios;
+        $("#resAvgDuration").textContent = formatMs(a.avgRunDurationMs);
+        $("#resFirstRun").textContent = formatTimestamp(a.firstRunAt);
+        $("#resLastRun").textContent = formatTimestamp(a.lastRunAt);
+
+        if (!a.flakiest || a.flakiest.length === 0) {
+          $("#resFlakiest").innerHTML =
+            '<div class="muted" style="color: var(--g400)">No flaky scenarios detected yet. Scenarios need at least 2 runs with mixed outcomes to show up here.</div>';
+        } else {
+          let html = "";
+          for (const f of a.flakiest) {
+            html +=
+              '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid var(--g100)">' +
+              '<span style="font-family:var(--mono);font-size:11px">' + escapeHtml(f.scenarioName) + "</span>" +
+              '<span style="font-family:var(--mono);font-size:11px;color:var(--g500)">' +
+              f.passRatePct.toFixed(0) + "% · " + f.passes + "/" + f.runs +
+              "</span></div>";
+          }
+          $("#resFlakiest").innerHTML = html;
+        }
+
+        $("#resSub").textContent =
+          a.totalRuns + " run" + (a.totalRuns === 1 ? "" : "s") +
+          " · " + a.totalScenarios + " scenario execution" + (a.totalScenarios === 1 ? "" : "s") +
+          " · " + currentAdapter;
+      }
+
+      function renderRunList(runs) {
+        const list = $("#resRunList");
+        list.innerHTML = "";
+        if (runs.length === 0) {
+          const div = document.createElement("div");
+          div.style.cssText = "padding: 20px; text-align: center; font-size: 12px; color: var(--g400);";
+          div.textContent = "No runs recorded yet.";
+          list.appendChild(div);
+          return;
+        }
+        for (const r of runs) {
+          const row = document.createElement("div");
+          row.className = "sc-row";
+          const verdictClass = r.failedScenarios > 0
+            ? "d-fail"
+            : r.warnedScenarios > 0
+              ? "d-warn"
+              : "d-pass";
+          const verdictText = r.failedScenarios > 0
+            ? "FAIL"
+            : r.warnedScenarios > 0
+              ? "PASS*"
+              : "PASS";
+
+          const dot = document.createElement("div");
+          dot.className = "sc-dot " + verdictClass;
+          row.appendChild(dot);
+
+          const main = document.createElement("div");
+          main.className = "sc-main";
+          const counts =
+            r.passedScenarios + "/" + r.totalScenarios + " passed" +
+            (r.warnedScenarios > 0 ? " · " + r.warnedScenarios + " warned" : "") +
+            (r.failedScenarios > 0 ? " · " + r.failedScenarios + " failed" : "");
+          main.innerHTML =
+            '<div class="sc-nm">' + escapeHtml(r.label) + ' <span style="font-family:var(--mono);color:var(--g400);font-size:11px;font-weight:400">· ' + r.trigger + '</span></div>' +
+            '<div class="sc-desc">' + formatTimestamp(r.timestamp) + " · " + counts + "</div>";
+          row.appendChild(main);
+
+          const verdict = document.createElement("span");
+          verdict.className = "sc-type";
+          verdict.textContent = verdictText;
+          row.appendChild(verdict);
+
+          const tm = document.createElement("div");
+          tm.className = "sc-tm";
+          tm.textContent = formatMs(r.durationMs);
+          row.appendChild(tm);
+
+          list.appendChild(row);
+        }
+      }
+
+      function formatMs(ms) {
+        if (ms == null || ms === 0) return "—";
+        if (ms < 1000) return ms + "ms";
+        if (ms < 60000) return (ms / 1000).toFixed(1) + "s";
+        const m = Math.floor(ms / 60000);
+        const s = Math.round((ms % 60000) / 1000);
+        return m + "m " + s + "s";
+      }
+
+      function formatTimestamp(iso) {
+        if (!iso) return "—";
+        const d = new Date(iso);
+        if (isNaN(d.getTime())) return iso;
+        const yyyy = d.getFullYear();
+        const mm = String(d.getMonth() + 1).padStart(2, "0");
+        const dd = String(d.getDate()).padStart(2, "0");
+        const hh = String(d.getHours()).padStart(2, "0");
+        const mi = String(d.getMinutes()).padStart(2, "0");
+        return yyyy + "-" + mm + "-" + dd + " " + hh + ":" + mi;
+      }
+
       // ---------- utils ----------
       function escapeHtml(s) {
         return String(s).replace(/[&<>"']/g, (c) => ({
@@ -1193,7 +1334,17 @@
       loadAdapters().then(() => {
         loadStatus();
         loadScenarios();
+        loadHistory();
       });
+
+      // After a successful scenario run, refresh the history so the
+      // Results tab picks up the new record without a manual reload.
+      const origRunOne = runOne;
+      runOne = async function (i) {
+        const r = await origRunOne(i);
+        loadHistory();
+        return r;
+      };
     </script>
   </body>
 </html>

@@ -23,6 +23,7 @@ import "dotenv/config";
 import { HermesAdapter } from "../src/adapters/hermes-adapter.js";
 import { OpenClawAdapter } from "../src/adapters/openclaw-adapter.js";
 import type { BotAdapter } from "../src/core/bot-adapter.js";
+import { createReportStore } from "../src/core/report-store.js";
 import {
   loadScenario,
   loadScenariosForAdapter,
@@ -40,6 +41,7 @@ const DEFAULT_KEY_PATH = join(
   "openclaw-ed25519.pem",
 );
 const DEFAULT_SCENARIO_DIR = join(PROJECT_ROOT, "scenarios");
+const DEFAULT_REPORTS_DIR = join(PROJECT_ROOT, "reports");
 
 interface CliArgs {
   target: string;
@@ -144,6 +146,7 @@ async function main() {
   }
   console.log(`connected. running ${scenarios.length} scenario(s) against ${adapter.name}.`);
 
+  const runStartedAt = Date.now();
   const results: ScenarioResult[] = [];
   for (const scenario of scenarios) {
     console.log();
@@ -156,8 +159,30 @@ async function main() {
     results.push(result);
     printScenarioResult(result);
   }
+  const runDurationMs = Date.now() - runStartedAt;
 
   await adapter.disconnect();
+
+  // Persist the run to reports/<adapter>/<id>-<label>.json so the web
+  // dashboard's Results tab (and future CI consumers) can read it back.
+  try {
+    const store = createReportStore(DEFAULT_REPORTS_DIR);
+    const record = store.saveRun({
+      adapter: adapterKind,
+      trigger: "cli",
+      scope: results.length === 1 ? "single" : "suite",
+      label: results.length === 1 ? (results[0]?.scenario ?? "run") : "suite",
+      startedAt: runStartedAt,
+      durationMs: runDurationMs,
+      results,
+    });
+    console.log();
+    console.log(`saved run report: reports/${adapterKind}/${record.id}-*.json`);
+  } catch (err) {
+    console.error(
+      `(warning: failed to save run report: ${(err as Error).message})`,
+    );
+  }
 
   // Summary
   console.log();
