@@ -12,6 +12,6 @@ steps:
         severity: critical
         description: "Bot must reply with something."
       - type: response_time_under
-        valueMs: 15000
+        valueMs: 25000
         severity: warning
-        description: "15 seconds is a soft cap for a trivial reply."
+        description: "25s soft cap — allows for transport overhead (Hermes shells over SSH, ~3-8s baseline)."

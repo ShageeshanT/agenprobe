@@ -104,6 +104,10 @@ export function loadScenario(filePath: string): Scenario {
 /**
  * Load every *.yaml / *.yml scenario in a directory. Files are returned in
  * filename order, which is usually what users want when running a suite.
+ *
+ * Does NOT recurse — only loads YAMLs in the given directory. For the
+ * multi-platform layout (scenarios/common + scenarios/<adapter>) use
+ * loadScenariosForAdapter instead.
  */
 export function loadScenariosFromDir(dir: string): Scenario[] {
   const entries = readdirSync(dir).sort();
@@ -114,6 +118,59 @@ export function loadScenariosFromDir(dir: string): Scenario[] {
     const ext = extname(entry).toLowerCase();
     if (ext !== ".yaml" && ext !== ".yml") continue;
     scenarios.push(loadScenario(full));
+  }
+  return scenarios;
+}
+
+/**
+ * Multi-platform scenario loader.
+ *
+ * If `root` is a directory containing `common/` and/or `<adapter>/` sub-
+ * directories, load the union:
+ *
+ *     scenarios/
+ *     ├── common/          → runs against every adapter
+ *     ├── openclaw/        → runs only when adapter === "openclaw"
+ *     └── hermes/          → runs only when adapter === "hermes"
+ *
+ * Otherwise (root has no known subdirectories, or is a flat dir of YAMLs),
+ * fall back to loadScenariosFromDir for backwards compatibility with any
+ * caller that still passes a flat directory.
+ *
+ * Order within the result is deterministic: common scenarios first (sorted
+ * by filename), then platform scenarios (sorted by filename). Running the
+ * common set first means transport/smoke issues surface before depth
+ * testing.
+ */
+export function loadScenariosForAdapter(
+  root: string,
+  adapter: string,
+): Scenario[] {
+  if (!statSync(root).isDirectory()) {
+    throw new Error(`not a directory: ${root}`);
+  }
+
+  const entries = new Set(readdirSync(root));
+  const hasCommon = entries.has("common");
+  const hasAdapter = entries.has(adapter);
+
+  // Legacy flat layout: no known subdirs → load YAMLs directly.
+  if (!hasCommon && !hasAdapter) {
+    return loadScenariosFromDir(root);
+  }
+
+  const scenarios: Scenario[] = [];
+  if (hasCommon) {
+    const commonDir = join(root, "common");
+    if (statSync(commonDir).isDirectory()) {
+      scenarios.push(...loadScenariosFromDir(commonDir));
+    }
+  }
+  if (hasAdapter) {
+    const adapterDir = join(root, adapter);
+    if (statSync(adapterDir).isDirectory()) {
+      scenarios.push(...loadScenariosFromDir(adapterDir));
+    }
   }
   return scenarios;
 }

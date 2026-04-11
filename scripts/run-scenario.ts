@@ -25,6 +25,7 @@ import { OpenClawAdapter } from "../src/adapters/openclaw-adapter.js";
 import type { BotAdapter } from "../src/core/bot-adapter.js";
 import {
   loadScenario,
+  loadScenariosForAdapter,
   loadScenariosFromDir,
   ScenarioLoadError,
 } from "../src/core/scenario-loader.js";
@@ -110,9 +111,14 @@ async function main() {
 
   let scenarios;
   try {
-    scenarios = statSync(target).isDirectory()
-      ? loadScenariosFromDir(target)
-      : [loadScenario(target)];
+    if (statSync(target).isDirectory()) {
+      // Multi-platform loader understands the scenarios/common +
+      // scenarios/<adapter> layout. Falls back to flat loading for legacy
+      // layouts.
+      scenarios = loadScenariosForAdapter(target, adapterKind);
+    } else {
+      scenarios = [loadScenario(target)];
+    }
   } catch (err) {
     if (err instanceof ScenarioLoadError) {
       console.error(`scenario load error in ${err.filePath}: ${err.message}`);
