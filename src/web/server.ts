@@ -14,12 +14,24 @@ import {
 } from "../core/scenario-loader.js";
 import { runScenario } from "../core/scenario-runner.js";
 import type { Scenario } from "../core/scenario.js";
+import {
+  discoverOpenClawConfig,
+  ensureOpenClawPairingKey,
+  pairOpenClawDevice,
+  parseRailwaySshCommand,
+  runStep,
+  testHermesEcho,
+  updateDotEnv,
+  type SetupResult,
+  type SetupStep,
+} from "../core/setup.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(HERE, "..", "..");
 const PUBLIC_DIR = join(HERE, "public");
 const DEFAULT_SCENARIO_DIR = join(PROJECT_ROOT, "scenarios");
 const DEFAULT_REPORTS_DIR = join(PROJECT_ROOT, "reports");
+const DEFAULT_DOTENV_PATH = join(PROJECT_ROOT, ".env");
 const DEFAULT_KEY_PATH = join(
   PROJECT_ROOT,
   ".agentprobe-keys",
@@ -30,6 +42,7 @@ export interface WebServerOptions {
   port?: number;
   scenarioDir?: string;
   reportsDir?: string;
+  dotenvPath?: string;
 }
 
 type AdapterKind = "openclaw" | "hermes";
@@ -86,12 +99,40 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<void>
   const port = opts.port ?? 4000;
   const scenarioDir = opts.scenarioDir ?? DEFAULT_SCENARIO_DIR;
   const reportsDir = opts.reportsDir ?? DEFAULT_REPORTS_DIR;
+  const dotenvPath = opts.dotenvPath ?? DEFAULT_DOTENV_PATH;
   const reports: ReportStore = createReportStore(reportsDir);
 
-  const entries = buildAdapterEntries();
+  // Adapter entries are rebuildable at runtime because the setup wizard
+  // can reconfigure an adapter without restarting the server. `entries`
+  // is the flat list for the /api/adapters route; `runtime` holds the
+  // (possibly connected) instance for each kind. Both get swapped when
+  // reloadAdapter(kind) is called.
+  let entries = buildAdapterEntries();
   const runtime = new Map<AdapterKind, AdapterRuntime>();
   for (const entry of entries) {
     runtime.set(entry.kind, { entry, connected: false });
+  }
+
+  /**
+   * Rebuild a single adapter entry from current process.env and replace
+   * it in the runtime map. Disconnects the previous instance (if any) so
+   * the next request runs a fresh handshake with the new config.
+   */
+  async function reloadAdapter(kind: AdapterKind): Promise<AdapterRuntime> {
+    const fresh = buildAdapterEntries().find((e) => e.kind === kind);
+    if (!fresh) throw new Error(`unknown adapter kind: ${kind}`);
+    const prior = runtime.get(kind);
+    if (prior?.instance) {
+      try {
+        await prior.instance.disconnect();
+      } catch {
+        /* ignore */
+      }
+    }
+    entries = entries.map((e) => (e.kind === kind ? fresh : e));
+    const next: AdapterRuntime = { entry: fresh, connected: false };
+    runtime.set(kind, next);
+    return next;
   }
 
   // Eagerly connect OpenClaw at boot — the handshake is quick and the UI
@@ -317,6 +358,212 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<void>
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
+  });
+
+  app.post("/api/setup/connect", async (req: Request, res: Response) => {
+    // Payload: { platform: "openclaw" | "hermes", sshCommand: string }
+    const platformRaw = req.body?.platform;
+    const sshCommandRaw = req.body?.sshCommand;
+    if (platformRaw !== "openclaw" && platformRaw !== "hermes") {
+      res.status(400).json({ error: "platform must be 'openclaw' or 'hermes'" });
+      return;
+    }
+    if (typeof sshCommandRaw !== "string" || !sshCommandRaw.trim()) {
+      res.status(400).json({ error: "sshCommand must be a non-empty string" });
+      return;
+    }
+    const platform = platformRaw as AdapterKind;
+    const sshCommand = sshCommandRaw;
+
+    const steps: SetupStep[] = [];
+    const envUpdates: Record<string, string> = {};
+    const result: SetupResult = {
+      platform,
+      success: false,
+      steps,
+      envUpdates,
+    };
+
+    // 1. Parse the railway ssh command → coordinates
+    const parsed = await runStep("parse", "Parse railway ssh command", () =>
+      parseRailwaySshCommand(sshCommand),
+    );
+    steps.push(parsed.step);
+    if (!parsed.value) {
+      result.error = parsed.step.detail ?? "unknown error";
+      res.json(result);
+      return;
+    }
+    const coords = parsed.value;
+    parsed.step.detail = `project=${coords.project.slice(0, 8)}… env=${coords.environment.slice(0, 8)}… service=${coords.service.slice(0, 8)}…`;
+
+    if (platform === "openclaw") {
+      // 2. Discover gateway URL + token + agent id from inside the container
+      const discovered = await runStep(
+        "discover",
+        "Discover gateway URL, token, agent",
+        () => discoverOpenClawConfig(coords),
+      );
+      steps.push(discovered.step);
+      if (!discovered.value) {
+        result.error = discovered.step.detail ?? "unknown error";
+        res.json(result);
+        return;
+      }
+      discovered.step.detail = `gatewayUrl=${discovered.value.gatewayUrl} agent=${discovered.value.agentId}`;
+
+      // 3. Generate (or load) pairing key
+      const keyStep = await runStep(
+        "key",
+        "Load or generate Ed25519 pairing key",
+        () => ensureOpenClawPairingKey(DEFAULT_KEY_PATH),
+      );
+      steps.push(keyStep.step);
+      if (!keyStep.value) {
+        result.error = keyStep.step.detail ?? "unknown error";
+        res.json(result);
+        return;
+      }
+      keyStep.step.detail = `deviceId=${keyStep.value.deviceId.slice(0, 16)}…`;
+
+      // 4. Inject device record into paired.json
+      const pairStep = await runStep(
+        "pair",
+        "Install device record in OpenClaw paired.json",
+        () => pairOpenClawDevice(coords, keyStep.value!),
+      );
+      steps.push(pairStep.step);
+      if (pairStep.step.status !== "ok") {
+        result.error = pairStep.step.detail ?? "unknown error";
+        res.json(result);
+        return;
+      }
+
+      // 5. Write env updates
+      const writeStep = await runStep("env", "Write credentials to .env", () => {
+        envUpdates.OPENCLAW_GATEWAY_URL = discovered.value!.gatewayUrl;
+        envUpdates.OPENCLAW_GATEWAY_TOKEN = discovered.value!.gatewayToken;
+        envUpdates.OPENCLAW_AGENT_ID = discovered.value!.agentId;
+        envUpdates.RAILWAY_PROJECT = coords.project;
+        envUpdates.RAILWAY_ENVIRONMENT = coords.environment;
+        envUpdates.RAILWAY_SERVICE = coords.service;
+        updateDotEnv(dotenvPath, envUpdates);
+        // Apply in-memory so the rebuilt adapter entry sees the new values
+        for (const [k, v] of Object.entries(envUpdates)) {
+          process.env[k] = v;
+        }
+      });
+      steps.push(writeStep.step);
+      if (writeStep.step.status !== "ok") {
+        result.error = writeStep.step.detail ?? "unknown error";
+        res.json(result);
+        return;
+      }
+
+      // 6. Rebuild adapter and connect
+      const connectStep = await runStep(
+        "connect",
+        "Reload adapter and run handshake",
+        async () => {
+          const rt = await reloadAdapter("openclaw");
+          await getOrConnect(rt);
+        },
+      );
+      steps.push(connectStep.step);
+      if (connectStep.step.status !== "ok") {
+        result.error = connectStep.step.detail ?? "unknown error";
+        res.json(result);
+        return;
+      }
+
+      // 7. Send a probe message to prove end-to-end
+      const pingStep = await runStep(
+        "ping",
+        "Send a probe message and wait for a reply",
+        async () => {
+          const rt = runtime.get("openclaw");
+          if (!rt?.instance) throw new Error("adapter missing after reload");
+          const reply = await rt.instance.sendMessage({
+            text: "respond with exactly: AGENTPROBE_OPENCLAW_SETUP_OK",
+            timeoutMs: 60_000,
+          });
+          if (!reply.text || !reply.text.includes("AGENTPROBE_OPENCLAW_SETUP_OK")) {
+            throw new Error(
+              `unexpected reply (first 120 chars): ${(reply.text || "").slice(0, 120)}`,
+            );
+          }
+          return reply.text;
+        },
+      );
+      steps.push(pingStep.step);
+      if (pingStep.step.status !== "ok") {
+        result.error = pingStep.step.detail ?? "unknown error";
+        res.json(result);
+        return;
+      }
+      if (pingStep.value) {
+        pingStep.step.detail = `reply: ${pingStep.value.slice(0, 80)}`;
+      }
+    } else {
+      // Hermes path — no discovery needed, no pairing. Just save coords
+      // and run a probe query through the shell-out transport.
+      const writeStep = await runStep("env", "Write Railway coords to .env", () => {
+        envUpdates.HERMES_RAILWAY_PROJECT = coords.project;
+        envUpdates.HERMES_RAILWAY_ENVIRONMENT = coords.environment;
+        envUpdates.HERMES_RAILWAY_SERVICE = coords.service;
+        updateDotEnv(dotenvPath, envUpdates);
+        for (const [k, v] of Object.entries(envUpdates)) {
+          process.env[k] = v;
+        }
+      });
+      steps.push(writeStep.step);
+      if (writeStep.step.status !== "ok") {
+        result.error = writeStep.step.detail ?? "unknown error";
+        res.json(result);
+        return;
+      }
+
+      const connectStep = await runStep(
+        "connect",
+        "Reload adapter and run preflight",
+        async () => {
+          const rt = await reloadAdapter("hermes");
+          await getOrConnect(rt);
+        },
+      );
+      steps.push(connectStep.step);
+      if (connectStep.step.status !== "ok") {
+        result.error = connectStep.step.detail ?? "unknown error";
+        res.json(result);
+        return;
+      }
+
+      const pingStep = await runStep(
+        "ping",
+        "Send a probe message and wait for a reply",
+        () => testHermesEcho(coords),
+      );
+      steps.push(pingStep.step);
+      if (pingStep.step.status !== "ok") {
+        result.error = pingStep.step.detail ?? "unknown error";
+        res.json(result);
+        return;
+      }
+      pingStep.step.detail = "reply: AGENTPROBE_HERMES_OK";
+    }
+
+    // Mask secrets before returning — the UI shouldn't see the raw token.
+    const maskedEnvUpdates: Record<string, string> = {};
+    for (const [k, v] of Object.entries(envUpdates)) {
+      if (/token|key|secret|password/i.test(k)) {
+        maskedEnvUpdates[k] = v.length > 8 ? v.slice(0, 4) + "…" + v.slice(-4) : "****";
+      } else {
+        maskedEnvUpdates[k] = v;
+      }
+    }
+    result.envUpdates = maskedEnvUpdates;
+    result.success = true;
+    res.json(result);
   });
 
   app.get("/api/history/:id", (req: Request, res: Response) => {

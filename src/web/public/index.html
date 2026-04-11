@@ -510,9 +510,30 @@
           </div>
         </div>
 
-        <div class="quick-actions">
+        <div class="quick-actions" style="margin-bottom: 20px">
           <button class="btn btn-dark btn-full" onclick="go(1)">Open chat →</button>
           <button class="btn btn-ghost btn-full" onclick="go(2)">View tests →</button>
+        </div>
+
+        <div class="card">
+          <div class="card-head">Connect a bot</div>
+          <p style="font-size: 12px; color: var(--g500); margin-bottom: 16px; line-height: 1.5">
+            Paste a <span style="font-family: var(--mono)">railway ssh</span> command from your Railway dashboard. AgentProbe will read the gateway URL and token from inside the container, install the pairing key (OpenClaw only), and run a quick probe message to prove it works.
+          </p>
+          <div style="display: flex; gap: 8px; margin-bottom: 12px">
+            <button class="btn btn-ghost" id="setupPlatformOpenclaw" onclick="setSetupPlatform('openclaw')" style="flex: 1">OpenClaw</button>
+            <button class="btn btn-ghost" id="setupPlatformHermes" onclick="setSetupPlatform('hermes')" style="flex: 1">Hermes</button>
+          </div>
+          <textarea
+            id="setupSshCommand"
+            rows="3"
+            placeholder="railway ssh --project=... --environment=... --service=..."
+            style="width: 100%; font-family: var(--mono); font-size: 12px; background: var(--g50); border: 1px solid var(--g200); border-radius: 8px; padding: 12px; color: var(--g900); outline: none; resize: vertical; box-sizing: border-box;"
+          ></textarea>
+          <div style="display: flex; gap: 10px; margin-top: 12px">
+            <button class="btn btn-dark" id="setupConnectBtn" onclick="runSetupConnect()" style="flex: 1; justify-content: center">Connect</button>
+          </div>
+          <div id="setupLog" style="margin-top: 16px"></div>
         </div>
       </div>
 
@@ -1315,6 +1336,132 @@
         return yyyy + "-" + mm + "-" + dd + " " + hh + ":" + mi;
       }
 
+      // ---------- setup wizard (Connect a bot) ----------
+      let setupPlatform = "openclaw";
+      let setupInFlight = false;
+
+      function setSetupPlatform(p) {
+        if (setupInFlight) return;
+        setupPlatform = p;
+        $("#setupPlatformOpenclaw").className =
+          "btn " + (p === "openclaw" ? "btn-dark" : "btn-ghost");
+        $("#setupPlatformHermes").className =
+          "btn " + (p === "hermes" ? "btn-dark" : "btn-ghost");
+      }
+
+      async function runSetupConnect() {
+        if (setupInFlight) return;
+        const sshCommand = $("#setupSshCommand").value.trim();
+        if (!sshCommand) {
+          renderSetupLog([
+            { id: "validate", label: "Validate input", status: "fail", detail: "SSH command is empty.", durationMs: 0 },
+          ]);
+          return;
+        }
+        setupInFlight = true;
+        $("#setupConnectBtn").disabled = true;
+        $("#setupConnectBtn").textContent = "Connecting…";
+        renderSetupLog([
+          { id: "submit", label: "Submitting to server…", status: "running", durationMs: 0 },
+        ]);
+
+        try {
+          const res = await fetch("/api/setup/connect", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ platform: setupPlatform, sshCommand }),
+          });
+          const data = await res.json();
+          renderSetupLog(data.steps || [], data);
+
+          if (data.success) {
+            // Refresh everything adapter-scoped so the rest of the dashboard
+            // reflects the newly-connected bot immediately.
+            currentAdapter = setupPlatform;
+            localStorage.setItem(ADAPTER_STORAGE_KEY, currentAdapter);
+            await loadAdapters();
+            await loadStatus();
+            await loadScenarios();
+            await loadHistory();
+          }
+        } catch (err) {
+          renderSetupLog([
+            {
+              id: "network",
+              label: "Network error",
+              status: "fail",
+              detail: err.message || String(err),
+              durationMs: 0,
+            },
+          ]);
+        } finally {
+          setupInFlight = false;
+          $("#setupConnectBtn").disabled = false;
+          $("#setupConnectBtn").textContent = "Connect";
+        }
+      }
+
+      function renderSetupLog(steps, envelope) {
+        const el = $("#setupLog");
+        el.innerHTML = "";
+        if (steps.length === 0) return;
+
+        for (const step of steps) {
+          const row = document.createElement("div");
+          const icon =
+            step.status === "ok"
+              ? "✓"
+              : step.status === "fail"
+                ? "✗"
+                : step.status === "skipped"
+                  ? "·"
+                  : "…";
+          const color =
+            step.status === "ok"
+              ? "var(--g900)"
+              : step.status === "fail"
+                ? "var(--g900)"
+                : "var(--g400)";
+          const weight = step.status === "fail" ? "600" : "400";
+
+          row.style.cssText =
+            "display: flex; align-items: flex-start; gap: 10px; padding: 6px 0; font-family: var(--mono); font-size: 11px; line-height: 1.5;";
+          row.innerHTML =
+            '<span style="width: 14px; color: ' + color + '; font-weight: 600; flex-shrink: 0;">' + icon + "</span>" +
+            '<span style="flex: 1; color: var(--g700); font-weight: ' + weight + ';">' +
+            escapeHtml(step.label) +
+            (step.detail ? '<span style="display:block; color: var(--g500); margin-top: 2px; font-weight: 400;">' + escapeHtml(step.detail) + "</span>" : "") +
+            "</span>" +
+            (step.durationMs > 0
+              ? '<span style="color: var(--g400); font-size: 10px;">' + step.durationMs + "ms</span>"
+              : "");
+          el.appendChild(row);
+        }
+
+        if (envelope) {
+          const summary = document.createElement("div");
+          summary.style.cssText =
+            "margin-top: 12px; padding: 10px 12px; border-radius: 8px; font-family: var(--mono); font-size: 11px;";
+          if (envelope.success) {
+            summary.style.background = "var(--g900)";
+            summary.style.color = "var(--white)";
+            const envKeys = Object.keys(envelope.envUpdates || {});
+            summary.innerHTML =
+              '<div style="font-weight: 600; margin-bottom: 4px;">✓ Connected</div>' +
+              '<div style="opacity: 0.7;">.env updated: ' + envKeys.length + " key" + (envKeys.length === 1 ? "" : "s") +
+              '. Dashboard switched to ' + setupPlatform + ".</div>";
+          } else {
+            summary.style.background = "var(--g100)";
+            summary.style.color = "var(--g900)";
+            summary.style.border = "1px solid var(--g300)";
+            summary.innerHTML =
+              '<div style="font-weight: 600; margin-bottom: 4px;">✗ Setup failed</div>' +
+              '<div style="color: var(--g600);">' + escapeHtml(envelope.error || "unknown error") + "</div>";
+          }
+          el.appendChild(summary);
+        }
+      }
+
       // ---------- utils ----------
       function escapeHtml(s) {
         return String(s).replace(/[&<>"']/g, (c) => ({
@@ -1331,6 +1478,7 @@
       });
 
       initSessions();
+      setSetupPlatform("openclaw");
       loadAdapters().then(() => {
         loadStatus();
         loadScenarios();
