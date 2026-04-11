@@ -315,6 +315,108 @@ console.log("AGENTPROBE_PAIR_OK=" + d.deviceId);
 }
 
 /**
+ * Remove an AgentProbe device record from the OpenClaw gateway's
+ * paired.json. Idempotent: if the deviceId isn't there, the call
+ * returns `{ removed: false }` and does not fail.
+ *
+ * Callers typically want to follow up by deleting their local pairing
+ * key (.agentprobe-keys/openclaw-ed25519.pem) — but that's a separate
+ * decision because the same key might still be used by another AgentProbe
+ * install against the same bot. This function only touches the remote
+ * state.
+ */
+export async function unpairOpenClawDevice(
+  coords: RailwayCoordinates,
+  deviceId: string,
+): Promise<{ removed: boolean; remainingDeviceCount: number }> {
+  const deviceIdB64 = Buffer.from(deviceId, "utf8").toString("base64");
+  const script = `
+cat > /tmp/agentprobe-unpair.js <<'UNPAIR_EOF'
+const fs = require("fs");
+const p = "/data/.openclaw/devices/paired.json";
+const target = Buffer.from(process.argv[2], "base64").toString("utf8");
+let obj = {};
+try {
+  obj = JSON.parse(fs.readFileSync(p, "utf8"));
+} catch {
+  // paired.json doesn't exist yet — nothing to remove.
+  console.log("AGENTPROBE_UNPAIR=" + JSON.stringify({ removed: false, remainingDeviceCount: 0 }));
+  process.exit(0);
+}
+const existed = Object.prototype.hasOwnProperty.call(obj, target);
+if (existed) {
+  delete obj[target];
+  fs.writeFileSync(p, JSON.stringify(obj, null, 2));
+}
+console.log("AGENTPROBE_UNPAIR=" + JSON.stringify({
+  removed: existed,
+  remainingDeviceCount: Object.keys(obj).length
+}));
+UNPAIR_EOF
+node /tmp/agentprobe-unpair.js ${deviceIdB64}
+rm -f /tmp/agentprobe-unpair.js
+`.trim();
+
+  const { stdout, stderr, code } = await runRemoteCommand(coords, script, 30_000);
+  if (code !== 0) {
+    throw new Error(
+      `openclaw unpair failed (exit ${code}): ${(stderr || stdout).trim().split(/\r?\n/).slice(-3).join(" ")}`,
+    );
+  }
+  const match = stdout.match(/AGENTPROBE_UNPAIR=(\{.*\})/);
+  if (!match || !match[1]) {
+    throw new Error("openclaw unpair produced no parseable output");
+  }
+  const parsed = JSON.parse(match[1]) as {
+    removed: boolean;
+    remainingDeviceCount: number;
+  };
+  return parsed;
+}
+
+/**
+ * Check whether a given deviceId is present in the gateway's paired.json.
+ * Read-only. Used to render pairing status in the Setup tab.
+ */
+export async function checkOpenClawPairingStatus(
+  coords: RailwayCoordinates,
+  deviceId: string,
+): Promise<{ paired: boolean; totalPairedDevices: number }> {
+  const deviceIdB64 = Buffer.from(deviceId, "utf8").toString("base64");
+  const script = `
+cat > /tmp/agentprobe-check-pair.js <<'CHECK_EOF'
+const fs = require("fs");
+const p = "/data/.openclaw/devices/paired.json";
+const target = Buffer.from(process.argv[2], "base64").toString("utf8");
+let obj = {};
+try { obj = JSON.parse(fs.readFileSync(p, "utf8")); } catch {}
+const paired = Object.prototype.hasOwnProperty.call(obj, target);
+console.log("AGENTPROBE_PAIR_STATUS=" + JSON.stringify({
+  paired,
+  totalPairedDevices: Object.keys(obj).length
+}));
+CHECK_EOF
+node /tmp/agentprobe-check-pair.js ${deviceIdB64}
+rm -f /tmp/agentprobe-check-pair.js
+`.trim();
+
+  const { stdout, stderr, code } = await runRemoteCommand(coords, script, 20_000);
+  if (code !== 0) {
+    throw new Error(
+      `openclaw pair-status check failed (exit ${code}): ${(stderr || stdout).trim().slice(-200)}`,
+    );
+  }
+  const match = stdout.match(/AGENTPROBE_PAIR_STATUS=(\{.*\})/);
+  if (!match || !match[1]) {
+    throw new Error("openclaw pair-status produced no parseable output");
+  }
+  return JSON.parse(match[1]) as {
+    paired: boolean;
+    totalPairedDevices: number;
+  };
+}
+
+/**
  * Run a trivial `hermes chat` round-trip from inside the container. If
  * the reply starts with the expected sentinel, we've proven the Hermes
  * shell-out transport works without writing a full adapter instance.

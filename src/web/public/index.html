@@ -510,6 +510,21 @@
           </div>
         </div>
 
+        <div class="card" id="pairingCard" style="display: none; margin-bottom: 16px">
+          <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 16px">
+            <div style="flex: 1; min-width: 0">
+              <div class="card-head">Device pairing</div>
+              <div class="kv-row"><span class="kv-k">Status</span><span class="kv-v" id="kvPairStatus">—</span></div>
+              <div class="kv-row"><span class="kv-k">Device ID</span><span class="kv-v" id="kvPairDeviceId">—</span></div>
+              <div class="kv-row"><span class="kv-k">Devices on gateway</span><span class="kv-v" id="kvPairTotal">—</span></div>
+            </div>
+            <div style="display: flex; flex-direction: column; gap: 8px; min-width: 120px">
+              <button class="btn btn-ghost" id="unpairBtn" onclick="runUnpair()" style="justify-content: center">Unpair</button>
+            </div>
+          </div>
+          <div id="unpairResult" style="margin-top: 12px; font-family: var(--mono); font-size: 11px"></div>
+        </div>
+
         <div class="quick-actions" style="margin-bottom: 20px">
           <button class="btn btn-dark btn-full" onclick="go(1)">Open chat →</button>
           <button class="btn btn-ghost btn-full" onclick="go(2)">View tests →</button>
@@ -813,9 +828,74 @@
             .split("/")
             .slice(-2)
             .join("/") || "—";
+
+          // Device pairing card — only for OpenClaw, only when the
+          // server has Railway coords + a local pairing key. Hidden
+          // otherwise so Hermes and unconfigured setups don't show a
+          // confusing empty card.
+          const pairCard = $("#pairingCard");
+          if (d.pairing && currentAdapter === "openclaw") {
+            pairCard.style.display = "";
+            $("#kvPairStatus").textContent = d.pairing.paired
+              ? "PAIRED"
+              : "NOT PAIRED";
+            $("#kvPairStatus").style.color = d.pairing.paired
+              ? "var(--g900)"
+              : "var(--g500)";
+            $("#kvPairDeviceId").textContent = d.pairing.deviceIdShort || "—";
+            $("#kvPairTotal").textContent = String(
+              d.pairing.totalPairedDevices,
+            );
+            $("#unpairBtn").disabled = !d.pairing.paired;
+            $("#unpairResult").innerHTML = "";
+          } else {
+            pairCard.style.display = "none";
+          }
         } catch (err) {
           $("#connPill").textContent = "status error";
           $("#connPill").className = "conn-pill fail";
+        }
+      }
+
+      async function runUnpair() {
+        if (!confirm("Remove AgentProbe's device record from the gateway? The pairing key on disk will be kept — re-run the setup wizard to re-pair.")) {
+          return;
+        }
+        const btn = $("#unpairBtn");
+        const out = $("#unpairResult");
+        btn.disabled = true;
+        btn.textContent = "Unpairing…";
+        out.innerHTML = "";
+        try {
+          const res = await fetch("/api/setup/unpair", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ platform: "openclaw" }),
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            out.innerHTML =
+              '<div style="color: var(--g900); font-weight: 600;">✗ unpair failed: ' +
+              escapeHtml(data.error || "unknown error") +
+              "</div>";
+          } else {
+            out.innerHTML =
+              '<div style="color: var(--g900);">✓ ' +
+              (data.removed
+                ? "device removed from paired.json"
+                : "device was already absent") +
+              ' · ' + data.remainingDeviceCount +
+              ' device' + (data.remainingDeviceCount === 1 ? "" : "s") +
+              ' remaining on gateway</div>';
+            await loadStatus();
+          }
+        } catch (err) {
+          out.innerHTML =
+            '<div style="color: var(--g900); font-weight: 600;">✗ network error: ' +
+            escapeHtml(err.message || String(err)) +
+            "</div>";
+        } finally {
+          btn.textContent = "Unpair";
         }
       }
 

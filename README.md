@@ -17,38 +17,58 @@ This is an MVP-0 working prototype. It is not production software.
 What works today:
 
 - **OpenClaw adapter** — connects to any self-hosted OpenClaw instance over
-  its native WebSocket RPC, completes the device-attested handshake, sends a
-  chat message, waits for the run to finish, returns the reply text.
+  its native WebSocket RPC, completes the Ed25519 device-attested handshake,
+  sends a chat message, waits for the run to finish, returns the reply text
+  and every intermediate event (tool calls, lifecycle phases).
 - **Hermes adapter** — shells out to `hermes chat -q ... -Q --source tool`
   over `railway ssh`, captures the quiet-mode reply, maintains session
   continuity via Hermes's own session IDs.
-- **Device pairing (OpenClaw)** — generate an Ed25519 keypair, register the
-  public key in the gateway's paired-device store, authenticate subsequent
-  connections with real device signatures.
+- **In-browser setup wizard** — paste a `railway ssh --project=... --environment=...
+  --service=...` line into the Setup tab, pick a platform, click Connect. The
+  server parses the command, reads the gateway URL and token from inside the
+  container, loads or generates the pairing key, installs the device record,
+  writes `.env`, hot-reloads the adapter without a restart, and runs a probe
+  message. Unpair button available to tear the pairing down cleanly.
 - **Scenario engine** — YAML test scenarios with multi-step conversations,
-  session continuity, seven assertion types, per-step timeouts, and
-  severity levels (critical / warning / info). Scenarios are organised by
-  platform: `scenarios/common/` runs against every adapter, while
-  `scenarios/openclaw/` and `scenarios/hermes/` hold platform-specific
-  tests for E.C.H.O. and Jarvis respectively.
+  session continuity, per-step timeouts, severity levels (critical / warning
+  / info), and **eleven assertion types**: `response_contains`,
+  `response_not_contains`, `response_matches`, `response_time_under`,
+  `response_time_over`, `response_is_non_empty`, `response_is_empty`,
+  `agentdb_query` (OpenClaw: run a read-only SELECT and assert on rows),
+  `tool_called` / `tool_not_called`, `tool_call_count`, and
+  `tool_params_contain`.
+- **Platform-scoped scenarios** — `scenarios/common/` runs against every
+  adapter, `scenarios/openclaw/` holds E.C.H.O.-specific tests (identity,
+  deflection, AgentDB reads, tool-use workflows), `scenarios/hermes/` holds
+  Jarvis-persona tests. The runner auto-picks the right slice for the
+  chosen adapter.
 - **CLI scenario runner** — `npm run scenarios` (OpenClaw) or
   `npx tsx scripts/run-scenario.ts scenarios --adapter hermes` runs the
   right suite for the chosen adapter and prints a readable pass/fail
   report. Exit code 0/1 so it drops straight into CI.
+- **Run history** — every scenario run (CLI or web) is persisted to
+  `reports/<adapter>/<id>-<label>.json`. The dashboard's Results tab
+  computes real aggregate stats across the whole history: pass rate,
+  average step latency, flakiest scenarios, recent runs list with
+  expandable detail.
 - **Web dashboard** — single-page UI at `http://localhost:4000` with an
   adapter picker in the topbar (OpenClaw / Hermes), live chat with session
-  pinning, a scenario browser with one-click run and run-all, and
-  per-assertion pass/fail display. Hermes is connected lazily on first use
-  to avoid paying the SSH preflight cost when you're not using it.
+  pinning, a scenario browser with one-click run and run-all, per-assertion
+  pass/fail display, device pairing status + unpair button, and the Results
+  tab wired to real run history. Hermes is connected lazily on first use so
+  the SSH preflight cost only happens when you pick it.
 
 What is not built yet:
 
 - A proper CLI (`agentprobe init`, `agentprobe run`, etc.) — today's entry
   points are scripts under `scripts/`.
-- Run history / report persistence (the Results tab still shows placeholders).
-- Multi-profile / multi-environment configuration (one `.env` per install).
-- Reporting exports (JUnit, HTML).
+- Multi-profile / multi-environment configuration (one `.env` per install —
+  "Connect a bot" overwrites the current config for the chosen platform).
+- Reporting exports (JUnit XML, HTML).
 - Scenario authoring UI (you write YAML by hand for now).
+- Unit tests for the core modules.
+- Token rotation auto-recovery (if the gateway token changes on the bot
+  side, AgentProbe's signatures become invalid; re-run the setup wizard).
 
 The [Roadmap](#roadmap) section has the full picture.
 
@@ -394,6 +414,9 @@ identity-check
 
 ### Assertion catalog
 
+**Response-based assertions** run against the bot's final reply text
+and timing. Sync, work against every adapter.
+
 | Type | Fields | Purpose |
 |---|---|---|
 | `response_contains` | `value`, `caseInsensitive?` | Reply must contain the substring. |
@@ -403,6 +426,40 @@ identity-check
 | `response_time_over` | `valueMs` | Latency must be over N ms (for "the bot should actually think, not echo"). |
 | `response_is_non_empty` | (none) | Reply must have non-whitespace content. |
 | `response_is_empty` | (none) | Reply must be empty (rare, but useful for no-op instructions). |
+
+**Tool-call assertions** inspect the event stream emitted while the bot
+produces its reply. Work against OpenClaw (whose `agent`-stream events
+carry tool-invocation detail) and are automatically "no tool calls
+observed" on Hermes (which runs quiet-mode shell-out).
+
+| Type | Fields | Purpose |
+|---|---|---|
+| `tool_called` | `tool` | Assert the bot invoked a tool by this name at least once. |
+| `tool_not_called` | `tool` | Inverse. Great for "this request should not need a tool" refusal tests. |
+| `tool_call_count` | `tool?`, `expectCount?`, `expectMin?`, `expectMax?` | Bound the number of calls to a tool. Catches tool-call loops when the bot can't converge. |
+| `tool_params_contain` | `tool`, `value`, `caseInsensitive?` | Substring check on the JSON-stringified args of any matching invocation. |
+
+**AgentDB assertion** queries the OpenClaw AgentDB SQLite file directly
+over `railway ssh`. Read-only — never mutates. Automatically skipped
+with `info: "skipped — adapter does not support AgentDB queries"` when
+the scenario runs against a non-OpenClaw adapter or when Railway
+coordinates aren't available.
+
+| Type | Fields | Purpose |
+|---|---|---|
+| `agentdb_query` | `sql`, `params?`, `expectRowCount?`, `expectMinRows?`, `expectMaxRows?`, `expectFirstRow?` | Run a SELECT/PRAGMA against the agentdb sqlite file, assert on row counts and/or the first row's column values. |
+
+Example:
+
+```yaml
+- type: agentdb_query
+  sql: "SELECT name FROM contacts WHERE primary_phone = ?"
+  params: ["+94766130939"]
+  expectRowCount: 1
+  expectFirstRow:
+    name: "Shagee"
+  severity: critical
+```
 
 Every assertion accepts:
 
@@ -719,35 +776,63 @@ AgenProbe/
 ├── .agentprobe-keys/
 │   └── openclaw-ed25519.pem             — your pairing private key (never commit)
 │
-├── scenarios/                           — YAML test scenarios
-│   ├── 01-basic-ping.yaml
-│   ├── 02-identity-check.yaml
-│   ├── 03-tool-awareness.yaml
-│   └── 04-format-compliance.yaml
+├── reports/                             — persisted scenario run history (gitignored)
+│   ├── openclaw/
+│   └── hermes/
+│
+├── scenarios/
+│   ├── common/                          — platform-agnostic
+│   │   ├── basic-ping.yaml
+│   │   ├── format-compliance.yaml
+│   │   ├── identity-generic.yaml
+│   │   └── tool-awareness.yaml
+│   ├── openclaw/                        — E.C.H.O.-specific
+│   │   ├── agentdb-contacts-read.yaml
+│   │   ├── echo-contact-count.yaml
+│   │   ├── echo-contact-lookup-loop.yaml
+│   │   ├── echo-deflection.yaml
+│   │   ├── echo-identity.yaml
+│   │   ├── echo-memory-recall.yaml
+│   │   ├── echo-tone.yaml
+│   │   ├── echo-tool-refusal.yaml
+│   │   └── echo-tools.yaml
+│   └── hermes/                          — Jarvis-on-Hermes specific
+│       ├── jarvis-deflection.yaml
+│       ├── jarvis-identity.yaml
+│       ├── jarvis-tone.yaml
+│       └── jarvis-tools.yaml
 │
 ├── src/
 │   ├── core/
 │   │   ├── bot-adapter.ts               — BotAdapter interface, BotReply,
 │   │   │                                   BotEvent, BotAdapterError
 │   │   ├── scenario.ts                  — Scenario / Step / Assertion types
-│   │   ├── assertions.ts                — evaluate + summarize assertions
-│   │   ├── scenario-runner.ts           — executes a Scenario against an adapter
-│   │   └── scenario-loader.ts           — YAML parser + shape validation
+│   │   ├── assertions.ts                — sync + async assertion evaluators
+│   │   ├── scenario-runner.ts           — executes a Scenario, dispatches
+│   │   │                                   async assertions via platform handlers
+│   │   ├── scenario-loader.ts           — YAML parser + shape validation
+│   │   ├── report-store.ts              — reports/ persistence + aggregate stats
+│   │   └── setup.ts                     — in-browser setup wizard helpers
+│   │                                      (parse ssh, discover, pair, unpair, test)
 │   ├── adapters/
 │   │   ├── openclaw-adapter.ts          — WebSocket client, handshake,
 │   │   │                                   chat.send lifecycle, history fetch
-│   │   └── openclaw-device-auth.ts      — Ed25519 key gen/load, payload
-│   │                                      builder, signer, deviceId derivation
+│   │   ├── openclaw-device-auth.ts      — Ed25519 key gen/load, payload
+│   │   │                                   builder, signer, deviceId derivation
+│   │   ├── openclaw-agentdb.ts          — read-only SQL helper for agentdb_query
+│   │   │                                   assertions (shells out via railway ssh)
+│   │   └── hermes-adapter.ts            — shell-out to `hermes chat` over ssh
 │   └── web/
-│       ├── server.ts                    — Express server, JSON API
+│       ├── server.ts                    — Express server, multi-adapter JSON API
 │       └── public/
 │           └── index.html               — single-file dashboard UI
 │
 └── scripts/
     ├── pair-openclaw.ts                 — generate key, inject device record
-    │                                      (Windows quoting bug — see Setup)
-    ├── smoke-openclaw.ts                — end-to-end probe, the main UX
-    ├── run-scenario.ts                  — CLI scenario runner
+    │                                      (delegates to src/core/setup.ts)
+    ├── smoke-openclaw.ts                — end-to-end probe, OpenClaw
+    ├── smoke-hermes.ts                  — end-to-end probe, Hermes
+    ├── run-scenario.ts                  — CLI scenario runner (multi-adapter)
     └── run-web.ts                       — web dashboard entry point
 ```
 

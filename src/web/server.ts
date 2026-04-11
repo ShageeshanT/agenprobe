@@ -19,13 +19,16 @@ import {
 } from "../core/scenario-runner.js";
 import type { Scenario } from "../core/scenario.js";
 import {
+  checkOpenClawPairingStatus,
   discoverOpenClawConfig,
   ensureOpenClawPairingKey,
   pairOpenClawDevice,
   parseRailwaySshCommand,
   runStep,
   testHermesEcho,
+  unpairOpenClawDevice,
   updateDotEnv,
+  type RailwayCoordinates,
   type SetupResult,
   type SetupStep,
 } from "../core/setup.js";
@@ -221,6 +224,7 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<void>
         connected: false,
         connectionError: rt.entry.configurationError ?? "not configured",
         scenarioDir,
+        pairing: null,
       });
       return;
     }
@@ -231,6 +235,36 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<void>
     } catch {
       /* error is already captured on rt */
     }
+
+    // Pairing status is OpenClaw-only — Hermes uses a simple shell-out
+    // with no device attestation. For OpenClaw, we fire a short SSH
+    // check-and-return against the target paired.json. Failures (SSH
+    // down, file missing, etc.) are non-fatal: we return pairing: null
+    // and the UI just doesn't render the card.
+    let pairing: null | {
+      deviceId: string;
+      deviceIdShort: string;
+      paired: boolean;
+      totalPairedDevices: number;
+    } = null;
+    if (kind === "openclaw") {
+      try {
+        const coords = readOpenClawCoords();
+        if (coords) {
+          const key = ensureOpenClawPairingKey(DEFAULT_KEY_PATH);
+          const status = await checkOpenClawPairingStatus(coords, key.deviceId);
+          pairing = {
+            deviceId: key.deviceId,
+            deviceIdShort: key.deviceId.slice(0, 16) + "…",
+            paired: status.paired,
+            totalPairedDevices: status.totalPairedDevices,
+          };
+        }
+      } catch {
+        /* swallow — pairing status is best-effort */
+      }
+    }
+
     res.json({
       adapter: kind,
       botLabel: rt.entry.botLabel,
@@ -238,6 +272,7 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<void>
       connected: rt.connected,
       connectionError: rt.connectError ?? null,
       scenarioDir,
+      pairing,
     });
   });
 
@@ -607,6 +642,44 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<void>
     res.json(result);
   });
 
+  app.post("/api/setup/unpair", async (req: Request, res: Response) => {
+    // Payload: { platform: "openclaw" } — Hermes has nothing to unpair.
+    if (req.body?.platform !== "openclaw") {
+      res.status(400).json({
+        error: "unpair is only supported for the openclaw platform",
+      });
+      return;
+    }
+    try {
+      const coords = readOpenClawCoords();
+      if (!coords) {
+        res.status(400).json({
+          error:
+            "RAILWAY_PROJECT / ENVIRONMENT / SERVICE env vars must be set",
+        });
+        return;
+      }
+      const key = ensureOpenClawPairingKey(DEFAULT_KEY_PATH);
+      const result = await unpairOpenClawDevice(coords, key.deviceId);
+
+      // Force a fresh adapter build on the next connect so the cached
+      // (potentially unauthorised) instance gets thrown away.
+      await reloadAdapter("openclaw");
+
+      res.json({
+        success: true,
+        deviceId: key.deviceId,
+        deviceIdShort: key.deviceId.slice(0, 16) + "…",
+        removed: result.removed,
+        remainingDeviceCount: result.remainingDeviceCount,
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
   app.get("/api/history/:id", (req: Request, res: Response) => {
     const kind = resolveAdapterKind(req);
     const idRaw = req.params.id;
@@ -772,6 +845,14 @@ function resolveAdapterKind(req: Request): AdapterKind {
     "openclaw";
   if (raw === "openclaw" || raw === "hermes") return raw;
   return "openclaw";
+}
+
+function readOpenClawCoords(): RailwayCoordinates | undefined {
+  const project = process.env.RAILWAY_PROJECT;
+  const environment = process.env.RAILWAY_ENVIRONMENT;
+  const service = process.env.RAILWAY_SERVICE;
+  if (!project || !environment || !service) return undefined;
+  return { project, environment, service };
 }
 
 function summarizeScenario(s: Scenario) {
