@@ -7,6 +7,7 @@ import express, { type Request, type Response } from "express";
 import { HermesAdapter } from "../adapters/hermes-adapter.js";
 import { OpenClawAdapter } from "../adapters/openclaw-adapter.js";
 import type { BotAdapter, BotReply } from "../core/bot-adapter.js";
+import { createReportStore, type ReportStore } from "../core/report-store.js";
 import {
   loadScenariosForAdapter,
   ScenarioLoadError,
@@ -18,6 +19,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(HERE, "..", "..");
 const PUBLIC_DIR = join(HERE, "public");
 const DEFAULT_SCENARIO_DIR = join(PROJECT_ROOT, "scenarios");
+const DEFAULT_REPORTS_DIR = join(PROJECT_ROOT, "reports");
 const DEFAULT_KEY_PATH = join(
   PROJECT_ROOT,
   ".agentprobe-keys",
@@ -27,6 +29,7 @@ const DEFAULT_KEY_PATH = join(
 export interface WebServerOptions {
   port?: number;
   scenarioDir?: string;
+  reportsDir?: string;
 }
 
 type AdapterKind = "openclaw" | "hermes";
@@ -82,6 +85,8 @@ interface AdapterRuntime {
 export async function startWebServer(opts: WebServerOptions = {}): Promise<void> {
   const port = opts.port ?? 4000;
   const scenarioDir = opts.scenarioDir ?? DEFAULT_SCENARIO_DIR;
+  const reportsDir = opts.reportsDir ?? DEFAULT_REPORTS_DIR;
+  const reports: ReportStore = createReportStore(reportsDir);
 
   const entries = buildAdapterEntries();
   const runtime = new Map<AdapterKind, AdapterRuntime>();
@@ -230,8 +235,25 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<void>
         return;
       }
       const adapter = await getOrConnect(rt);
+      const startedAt = Date.now();
       const result = await runScenario(adapter, scenario);
-      res.json(result);
+      const durationMs = Date.now() - startedAt;
+      // Persist so the Results tab can read the run back.
+      try {
+        const record = reports.saveRun({
+          adapter: kind,
+          trigger: "web-single",
+          scope: "single",
+          label: scenario.name,
+          startedAt,
+          durationMs,
+          results: [result],
+        });
+        res.json({ ...result, runId: record.id });
+      } catch (saveErr) {
+        console.error(`[web] failed to persist run: ${(saveErr as Error).message}`);
+        res.json(result);
+      }
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
@@ -247,17 +269,71 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<void>
     try {
       const scenarios = loadScenariosForAdapter(scenarioDir, kind);
       const adapter = await getOrConnect(rt);
+      const startedAt = Date.now();
       const results = [];
       for (const scenario of scenarios) {
         results.push(await runScenario(adapter, scenario));
       }
+      const durationMs = Date.now() - startedAt;
       const passed = results.filter((r) => r.passed).length;
+      let runId: string | undefined;
+      try {
+        const record = reports.saveRun({
+          adapter: kind,
+          trigger: "web-suite",
+          scope: "suite",
+          label: "suite",
+          startedAt,
+          durationMs,
+          results,
+        });
+        runId = record.id;
+      } catch (saveErr) {
+        console.error(`[web] failed to persist suite run: ${(saveErr as Error).message}`);
+      }
       res.json({
         adapter: kind,
         passed,
         total: results.length,
         results,
+        ...(runId ? { runId } : {}),
       });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.get("/api/history", (req, res) => {
+    const kind = resolveAdapterKind(req);
+    const limitParam = req.query.limit;
+    const limit =
+      typeof limitParam === "string" && /^\d+$/.test(limitParam)
+        ? Math.min(Number.parseInt(limitParam, 10), 500)
+        : 50;
+    try {
+      const runs = reports.listRuns(kind, { limit });
+      const aggregate = reports.computeAggregate(kind);
+      res.json({ adapter: kind, runs, aggregate });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.get("/api/history/:id", (req: Request, res: Response) => {
+    const kind = resolveAdapterKind(req);
+    const idRaw = req.params.id;
+    const id = typeof idRaw === "string" ? idRaw : "";
+    if (!id) {
+      res.status(400).json({ error: "missing run id" });
+      return;
+    }
+    try {
+      const record = reports.getRun(kind, id);
+      if (!record) {
+        res.status(404).json({ error: `no run with id "${id}" for adapter "${kind}"` });
+        return;
+      }
+      res.json(record);
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
