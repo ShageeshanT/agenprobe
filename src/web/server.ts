@@ -7,7 +7,14 @@ import express, { type Request, type Response } from "express";
 import { HermesAdapter } from "../adapters/hermes-adapter.js";
 import { queryAgentDB } from "../adapters/openclaw-agentdb.js";
 import { OpenClawAdapter } from "../adapters/openclaw-adapter.js";
+import { buildOpenClawDoctorChecks } from "../adapters/openclaw-doctor.js";
 import type { BotAdapter, BotReply } from "../core/bot-adapter.js";
+import {
+  createDoctorReportStore,
+  runDoctor,
+  type DoctorContext,
+  type DoctorReportStore,
+} from "../core/doctor-runner.js";
 import { createReportStore, type ReportStore } from "../core/report-store.js";
 import {
   loadScenariosForAdapter,
@@ -108,6 +115,7 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<void>
   const reportsDir = opts.reportsDir ?? DEFAULT_REPORTS_DIR;
   const dotenvPath = opts.dotenvPath ?? DEFAULT_DOTENV_PATH;
   const reports: ReportStore = createReportStore(reportsDir);
+  const doctorStore: DoctorReportStore = createDoctorReportStore(reportsDir);
 
   // Adapter entries are rebuildable at runtime because the setup wizard
   // can reconfigure an adapter without restarting the server. `entries`
@@ -640,6 +648,92 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<void>
     result.envUpdates = maskedEnvUpdates;
     result.success = true;
     res.json(result);
+  });
+
+  app.post("/api/doctor/run", async (req: Request, res: Response) => {
+    // Currently OpenClaw-only — Hermes doesn't have an equivalent
+    // infra-level health story (yet). We accept the adapter param for
+    // forward-compat but reject anything that's not "openclaw".
+    const kind = resolveAdapterKind(req);
+    if (kind !== "openclaw") {
+      res.status(400).json({
+        error: `doctor is only available for openclaw at the moment`,
+      });
+      return;
+    }
+    const coords = readOpenClawCoords();
+    const gatewayUrl = process.env.OPENCLAW_GATEWAY_URL;
+    if (!coords || !gatewayUrl) {
+      res.status(503).json({
+        error:
+          "doctor needs OPENCLAW_GATEWAY_URL + RAILWAY_PROJECT/ENVIRONMENT/SERVICE in .env",
+      });
+      return;
+    }
+    const ctx: DoctorContext = {
+      adapter: "openclaw",
+      coords,
+      gatewayUrl,
+      agentId: process.env.OPENCLAW_AGENT_ID ?? "main",
+    };
+    const token = process.env.OPENCLAW_GATEWAY_TOKEN;
+    if (token) ctx.gatewayToken = token;
+
+    try {
+      const checks = buildOpenClawDoctorChecks();
+      const report = await runDoctor(ctx, checks);
+      try {
+        doctorStore.saveReport(report);
+      } catch (saveErr) {
+        console.error(
+          `[web] failed to persist doctor report: ${(saveErr as Error).message}`,
+        );
+      }
+      res.json(report);
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  app.get("/api/doctor/history", (req, res) => {
+    const kind = resolveAdapterKind(req);
+    const limitParam = req.query.limit;
+    const limit =
+      typeof limitParam === "string" && /^\d+$/.test(limitParam)
+        ? Math.min(Number.parseInt(limitParam, 10), 200)
+        : 30;
+    try {
+      const reports = doctorStore.listReports(kind, { limit });
+      res.json({ adapter: kind, reports });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  app.get("/api/doctor/history/:id", (req: Request, res: Response) => {
+    const kind = resolveAdapterKind(req);
+    const idRaw = req.params.id;
+    const id = typeof idRaw === "string" ? idRaw : "";
+    if (!id) {
+      res.status(400).json({ error: "missing report id" });
+      return;
+    }
+    try {
+      const report = doctorStore.getReport(kind, id);
+      if (!report) {
+        res.status(404).json({ error: `no doctor report with id "${id}"` });
+        return;
+      }
+      res.json(report);
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   });
 
   app.post("/api/setup/unpair", async (req: Request, res: Response) => {

@@ -455,10 +455,11 @@
     <div class="tabs">
       <button class="tab active" onclick="go(0)">Setup</button>
       <button class="tab" onclick="go(1)">Chat</button>
-      <button class="tab" onclick="go(2)">Tests<span class="ct" id="tabTestCt">—</span></button>
-      <button class="tab" onclick="go(3)">Connectors<span class="preview-tag">preview</span></button>
-      <button class="tab" onclick="go(4)">Cron<span class="preview-tag">preview</span></button>
-      <button class="tab" onclick="go(5)">Results<span class="preview-tag">preview</span></button>
+      <button class="tab" onclick="go(2)">Doctor<span class="ct" id="tabDoctorCt">—</span></button>
+      <button class="tab" onclick="go(3)">Tests<span class="ct" id="tabTestCt">—</span></button>
+      <button class="tab" onclick="go(4)">Results</button>
+      <button class="tab" onclick="go(5)">Connectors<span class="preview-tag">preview</span></button>
+      <button class="tab" onclick="go(6)">Cron<span class="preview-tag">preview</span></button>
     </div>
 
     <div class="wrap">
@@ -527,7 +528,7 @@
 
         <div class="quick-actions" style="margin-bottom: 20px">
           <button class="btn btn-dark btn-full" onclick="go(1)">Open chat →</button>
-          <button class="btn btn-ghost btn-full" onclick="go(2)">View tests →</button>
+          <button class="btn btn-ghost btn-full" onclick="go(3)">View tests →</button>
         </div>
 
         <div class="card">
@@ -602,7 +603,35 @@
         </div>
       </div>
 
-      <!-- 2: TESTS -->
+      <!-- 2: DOCTOR -->
+      <div class="panel" id="p2_doctor">
+        <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px">
+          <div class="sh" style="margin-bottom: 0">
+            <h2>Doctor</h2>
+            <p id="doctorSub">Infrastructure-level health checks. Run before scenarios — if doctor fails, scenario results are usually meaningless.</p>
+          </div>
+          <button class="btn btn-dark" id="doctorRunBtn" onclick="runDoctorNow()">Run doctor →</button>
+        </div>
+
+        <div class="stats-row" style="grid-template-columns: repeat(5, 1fr); margin-bottom: 24px">
+          <div class="stat"><div class="stat-n" id="docTotal">—</div><div class="stat-l">Checks</div></div>
+          <div class="stat"><div class="stat-n" id="docOk">—</div><div class="stat-l">OK</div></div>
+          <div class="stat"><div class="stat-n" id="docWarn">—</div><div class="stat-l">Warnings</div></div>
+          <div class="stat"><div class="stat-n" id="docFail">—</div><div class="stat-l">Failed</div></div>
+          <div class="stat"><div class="stat-n" id="docDur">—</div><div class="stat-l">Duration</div></div>
+        </div>
+
+        <div id="doctorChecks" style="display: grid; gap: 16px"></div>
+
+        <div class="card" style="padding: 0; margin-top: 20px">
+          <div style="padding: 14px 20px; border-bottom: 1px solid var(--g150); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px; color: var(--g400)">
+            Recent runs
+          </div>
+          <div id="doctorHistory"></div>
+        </div>
+      </div>
+
+      <!-- 3: TESTS -->
       <div class="panel" id="p2">
         <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px">
           <div class="sh" style="margin-bottom: 0">
@@ -626,8 +655,8 @@
         </div>
       </div>
 
-      <!-- 3: CONNECTORS -->
-      <div class="panel" id="p3">
+      <!-- 5: CONNECTORS -->
+      <div class="panel" id="p5_connectors">
         <div class="sh">
           <h2>Connector testing</h2>
           <p>Intercept every outbound Gmail / Sheets / Calendar call the bot makes. Mock or live.</p>
@@ -663,8 +692,8 @@
         </div>
       </div>
 
-      <!-- 4: CRON -->
-      <div class="panel" id="p4">
+      <!-- 6: CRON -->
+      <div class="panel" id="p6_cron">
         <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px">
           <div class="sh" style="margin-bottom: 0">
             <h2>Cron &amp; time simulation</h2>
@@ -685,8 +714,8 @@
         </div>
       </div>
 
-      <!-- 5: RESULTS -->
-      <div class="panel" id="p5">
+      <!-- 4: RESULTS -->
+      <div class="panel" id="p4">
         <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px">
           <div class="sh" style="margin-bottom: 0">
             <h2>Run history</h2>
@@ -740,8 +769,22 @@
       }
 
       // ---------- tab switching ----------
+      // Tab index -> panel id. Order matches the .tabs button order in the
+      // header. Using an explicit map (instead of DOM index) means panels
+      // can live in any order in the markup and we can add/remove tabs
+      // without rewiring everything.
+      const PANEL_IDS = [
+        "p0",          // Setup
+        "p1",          // Chat
+        "p2_doctor",   // Doctor
+        "p2",          // Tests (legacy id, kept to avoid touching every reference)
+        "p4",          // Results
+        "p5_connectors", // Connectors (preview)
+        "p6_cron",     // Cron (preview)
+      ];
       function go(n) {
-        $$(".panel").forEach((p, i) => p.classList.toggle("active", i === n));
+        const targetId = PANEL_IDS[n];
+        $$(".panel").forEach((p) => p.classList.toggle("active", p.id === targetId));
         $$(".tab").forEach((t, i) => t.classList.toggle("active", i === n));
       }
 
@@ -1269,6 +1312,173 @@
         $("#sF").textContent = f;
       }
 
+      // ---------- doctor (Doctor tab) ----------
+      let doctorRunInFlight = false;
+
+      async function runDoctorNow() {
+        if (doctorRunInFlight) return;
+        if (currentAdapter !== "openclaw") {
+          alert("Doctor currently supports OpenClaw only.");
+          return;
+        }
+        doctorRunInFlight = true;
+        const btn = $("#doctorRunBtn");
+        btn.disabled = true;
+        btn.textContent = "running…";
+        // Reset stats while the run is in flight
+        $("#docTotal").textContent = "—";
+        $("#docOk").textContent = "—";
+        $("#docWarn").textContent = "—";
+        $("#docFail").textContent = "—";
+        $("#docDur").textContent = "running…";
+        $("#doctorChecks").innerHTML =
+          '<div class="muted" style="padding: 24px; text-align: center; color: var(--g500); font-size: 12px">Running ' +
+          "9 checks against the gateway… each one takes ~3 seconds, so the whole run is ~30s." +
+          "</div>";
+
+        try {
+          const res = await fetch("/api/doctor/run" + adapterQuery(), {
+            method: "POST",
+          });
+          const report = await res.json();
+          if (!res.ok) {
+            $("#doctorChecks").innerHTML =
+              '<div class="error-banner">' +
+              escapeHtml(report.error || "doctor run failed") +
+              "</div>";
+            return;
+          }
+          renderDoctorReport(report);
+          await loadDoctorHistory();
+        } catch (err) {
+          $("#doctorChecks").innerHTML =
+            '<div class="error-banner">network error: ' + escapeHtml(err.message) + "</div>";
+        } finally {
+          doctorRunInFlight = false;
+          btn.disabled = false;
+          btn.textContent = "Run doctor →";
+        }
+      }
+
+      function renderDoctorReport(report) {
+        $("#docTotal").textContent = report.summary.total;
+        $("#docOk").textContent = report.summary.ok;
+        $("#docWarn").textContent = report.summary.warn;
+        $("#docFail").textContent = report.summary.fail;
+        $("#docDur").textContent = (report.durationMs / 1000).toFixed(1) + "s";
+        $("#tabDoctorCt").textContent = report.summary.fail + report.summary.warn || "";
+
+        // Group checks by category for visual clarity.
+        const byCategory = new Map();
+        for (const c of report.checks) {
+          const list = byCategory.get(c.category) || [];
+          list.push(c);
+          byCategory.set(c.category, list);
+        }
+
+        const container = $("#doctorChecks");
+        container.innerHTML = "";
+        for (const [category, checks] of byCategory) {
+          const card = document.createElement("div");
+          card.className = "card";
+          card.style.padding = "0";
+          card.innerHTML =
+            '<div style="padding: 14px 20px; border-bottom: 1px solid var(--g150); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px; color: var(--g400)">' +
+            escapeHtml(category) +
+            "</div>";
+          for (const c of checks) {
+            const row = document.createElement("div");
+            row.style.cssText =
+              "padding: 14px 20px; border-bottom: 1px solid var(--g100); display: flex; gap: 14px; align-items: flex-start;";
+            const icon = document.createElement("div");
+            icon.style.cssText =
+              "width: 20px; height: 20px; border-radius: 50%; flex-shrink: 0; margin-top: 2px;";
+            if (c.status === "ok") icon.style.background = "var(--g900)";
+            else if (c.status === "warn") icon.style.background = "var(--g400)";
+            else if (c.status === "fail") {
+              icon.style.background = "var(--g900)";
+              icon.style.outline = "2px solid var(--g900)";
+              icon.style.outlineOffset = "2px";
+            } else icon.style.background = "var(--g200)";
+
+            const body = document.createElement("div");
+            body.style.cssText = "flex: 1; min-width: 0;";
+            body.innerHTML =
+              '<div style="font-size: 13px; font-weight: 600;">' +
+              escapeHtml(c.label) +
+              '</div>' +
+              '<div style="font-size: 12px; color: var(--g600); margin-top: 3px; overflow-wrap: anywhere;">' +
+              escapeHtml(c.detail) +
+              '</div>';
+            const dur = document.createElement("div");
+            dur.style.cssText =
+              "font-family: var(--mono); font-size: 11px; color: var(--g400); white-space: nowrap;";
+            dur.textContent = c.durationMs + "ms";
+            row.appendChild(icon);
+            row.appendChild(body);
+            row.appendChild(dur);
+            card.appendChild(row);
+          }
+          // Strip border from last row
+          const lastRow = card.lastElementChild;
+          if (lastRow && lastRow !== card.firstElementChild) {
+            lastRow.style.borderBottom = "none";
+          }
+          container.appendChild(card);
+        }
+      }
+
+      async function loadDoctorHistory() {
+        try {
+          const res = await fetch("/api/doctor/history" + adapterQuery() + "&limit=20");
+          const data = await res.json();
+          if (!res.ok || !data.reports) return;
+          const list = $("#doctorHistory");
+          list.innerHTML = "";
+          if (data.reports.length === 0) {
+            const div = document.createElement("div");
+            div.style.cssText =
+              "padding: 20px; text-align: center; font-size: 12px; color: var(--g400);";
+            div.textContent = "No doctor runs recorded yet.";
+            list.appendChild(div);
+            return;
+          }
+          for (const r of data.reports) {
+            const row = document.createElement("div");
+            row.className = "sc-row";
+
+            const dot = document.createElement("div");
+            dot.className = "sc-dot " + (r.passed ? "d-pass" : "d-fail");
+            row.appendChild(dot);
+
+            const main = document.createElement("div");
+            main.className = "sc-main";
+            const counts =
+              r.summary.ok + " ok" +
+              (r.summary.warn > 0 ? " · " + r.summary.warn + " warn" : "") +
+              (r.summary.fail > 0 ? " · " + r.summary.fail + " fail" : "");
+            main.innerHTML =
+              '<div class="sc-nm">' + escapeHtml(r.id.replace(/^doctor-/, "")) + "</div>" +
+              '<div class="sc-desc">' + formatTimestamp(r.timestamp) + " · " + counts + "</div>";
+            row.appendChild(main);
+
+            const verdict = document.createElement("span");
+            verdict.className = "sc-type";
+            verdict.textContent = r.passed ? "PASS" : "FAIL";
+            row.appendChild(verdict);
+
+            const tm = document.createElement("div");
+            tm.className = "sc-tm";
+            tm.textContent = formatMs(r.durationMs);
+            row.appendChild(tm);
+
+            list.appendChild(row);
+          }
+        } catch (err) {
+          /* ignore — best effort */
+        }
+      }
+
       // ---------- run history (Results tab) ----------
       let historyLoadInFlight = false;
 
@@ -1563,6 +1773,7 @@
         loadStatus();
         loadScenarios();
         loadHistory();
+        loadDoctorHistory();
       });
 
       // After a successful scenario run, refresh the history so the
