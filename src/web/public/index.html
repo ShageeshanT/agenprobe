@@ -52,6 +52,38 @@
         vertical-align: middle; letter-spacing: 0.5px; text-transform: uppercase;
       }
       .topbar-r { display: flex; align-items: center; gap: 16px; }
+
+      /* Adapter picker — pill-group toggle in the topbar */
+      .adapter-picker {
+        display: inline-flex;
+        gap: 3px;
+        background: var(--g100);
+        padding: 3px;
+        border-radius: 100px;
+      }
+      .ap-btn {
+        font-family: var(--font);
+        font-size: 11px;
+        font-weight: 600;
+        padding: 6px 14px;
+        border: none;
+        background: transparent;
+        color: var(--g500);
+        cursor: pointer;
+        border-radius: 100px;
+        transition: all 0.15s var(--ease);
+        letter-spacing: 0.2px;
+      }
+      .ap-btn:hover:not(:disabled) { color: var(--g900); }
+      .ap-btn.active {
+        background: var(--g900);
+        color: var(--white);
+      }
+      .ap-btn:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+
       .conn-pill {
         display: flex; align-items: center; gap: 6px;
         font-size: 12px; font-weight: 500; color: var(--g600);
@@ -410,6 +442,10 @@
   <body>
     <div class="topbar">
       <div class="logo"><b>agent</b>probe<span class="logo-tag">alpha</span></div>
+      <div class="adapter-picker" id="adapterPicker">
+        <button class="ap-btn active" data-adapter="openclaw">OpenClaw</button>
+        <button class="ap-btn" data-adapter="hermes">Hermes</button>
+      </div>
       <div class="topbar-r">
         <div class="conn-pill" id="connPill">connecting…</div>
         <div class="bot-id" id="botId">—</div>
@@ -666,6 +702,15 @@
       const $ = (s) => document.querySelector(s);
       const $$ = (s) => document.querySelectorAll(s);
 
+      // ---------- adapter picker state ----------
+      const ADAPTER_STORAGE_KEY = "agentprobe.adapter";
+      let currentAdapter =
+        localStorage.getItem(ADAPTER_STORAGE_KEY) || "openclaw";
+
+      function adapterQuery() {
+        return "?adapter=" + encodeURIComponent(currentAdapter);
+      }
+
       // ---------- tab switching ----------
       function go(n) {
         $$(".panel").forEach((p, i) => p.classList.toggle("active", i === n));
@@ -673,9 +718,64 @@
       }
 
       // ---------- setup / status ----------
+      async function loadAdapters() {
+        try {
+          const res = await fetch("/api/adapters");
+          const d = await res.json();
+          const picker = $("#adapterPicker");
+          picker.innerHTML = "";
+          for (const a of d.adapters || []) {
+            const btn = document.createElement("button");
+            btn.className = "ap-btn" + (a.kind === currentAdapter ? " active" : "");
+            btn.dataset.adapter = a.kind;
+            btn.textContent = a.label;
+            btn.disabled = !a.configured;
+            if (!a.configured) {
+              btn.title = a.configurationError || "not configured";
+            }
+            btn.onclick = () => switchAdapter(a.kind);
+            picker.appendChild(btn);
+          }
+          // If the stored adapter is unconfigured, fall back to the first
+          // configured one.
+          const selected = (d.adapters || []).find((a) => a.kind === currentAdapter);
+          if (!selected || !selected.configured) {
+            const firstOk = (d.adapters || []).find((a) => a.configured);
+            if (firstOk) {
+              currentAdapter = firstOk.kind;
+              localStorage.setItem(ADAPTER_STORAGE_KEY, currentAdapter);
+              for (const btn of picker.querySelectorAll(".ap-btn")) {
+                btn.classList.toggle("active", btn.dataset.adapter === currentAdapter);
+              }
+            }
+          }
+        } catch (err) {
+          // Leave the hardcoded default buttons in place if /api/adapters fails.
+        }
+      }
+
+      async function switchAdapter(kind) {
+        if (kind === currentAdapter) return;
+        currentAdapter = kind;
+        localStorage.setItem(ADAPTER_STORAGE_KEY, kind);
+        for (const btn of $$("#adapterPicker .ap-btn")) {
+          btn.classList.toggle("active", btn.dataset.adapter === kind);
+        }
+        // Switching adapter resets everything adapter-scoped:
+        //   - chat sessions (bots don't share conversation state)
+        //   - scenario list (platform-specific suites differ)
+        //   - status pill
+        sessions = [];
+        initSessions();
+        $("#connPill").textContent = "connecting…";
+        $("#connPill").className = "conn-pill";
+        await loadStatus();
+        await loadScenarios();
+      }
+
       async function loadStatus() {
         try {
-          const res = await fetch("/api/status");
+          const res = await fetch("/api/status" + adapterQuery());
           const d = await res.json();
           const pill = $("#connPill");
           if (d.connected) {
@@ -685,14 +785,19 @@
             pill.textContent = "disconnected";
             pill.className = "conn-pill fail";
           }
-          $("#botId").textContent = d.agentId ? d.agentId + " · openclaw" : "—";
-          $("#kvGateway").textContent = d.gatewayUrl || "—";
-          $("#kvAgent").textContent = d.agentId || "—";
+          $("#botId").textContent = (d.botLabel || "—") + " · " + currentAdapter;
+          $("#kvGateway").textContent = d.transport || "—";
+          $("#kvAgent").textContent = d.botLabel || "—";
           $("#kvStatus").textContent = d.connected
             ? "connected"
             : d.connectionError || "disconnected";
           if (!d.connected) $("#kvStatus").classList.add("dim");
-          $("#kvScenarioDir").textContent = (d.scenarioDir || "").replace(/\\\\/g, "/").split("/").slice(-2).join("/") || "—";
+          else $("#kvStatus").classList.remove("dim");
+          $("#kvScenarioDir").textContent = (d.scenarioDir || "")
+            .replace(/\\\\/g, "/")
+            .split("/")
+            .slice(-2)
+            .join("/") || "—";
         } catch (err) {
           $("#connPill").textContent = "status error";
           $("#connPill").className = "conn-pill fail";
@@ -828,7 +933,7 @@
           const res = await fetch("/api/chat", {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ text, sessionKey }),
+            body: JSON.stringify({ text, sessionKey, adapter: currentAdapter }),
           });
           if (!res.ok) {
             const err = await res.json().catch(() => ({ error: "HTTP " + res.status }));
@@ -874,7 +979,7 @@
 
       async function loadScenarios() {
         try {
-          const res = await fetch("/api/scenarios");
+          const res = await fetch("/api/scenarios" + adapterQuery());
           const data = await res.json();
           if (data.error) {
             $("#testsSub").textContent = "load error: " + data.error;
@@ -887,12 +992,18 @@
             lastTimeMs: null,
             expanded: false,
           }));
+          // Reset the stats row — switching adapter clears prior run state.
+          $("#sP").textContent = "—";
+          $("#sW").textContent = "—";
+          $("#sF").textContent = "—";
+          $("#sDur").textContent = "—";
           const assertionTotal = scenarios.reduce((n, s) => n + s.assertionCount, 0);
           $("#tabTestCt").textContent = scenarios.length;
           $("#sT").textContent = scenarios.length;
           $("#testsSub").textContent =
             scenarios.length + " scenario" + (scenarios.length === 1 ? "" : "s") +
-            " · " + assertionTotal + " assertion" + (assertionTotal === 1 ? "" : "s");
+            " · " + assertionTotal + " assertion" + (assertionTotal === 1 ? "" : "s") +
+            " · " + currentAdapter;
           $("#kvScenarioCount").textContent = scenarios.length;
           $("#kvAssertionCount").textContent = assertionTotal;
           renderScenarioList();
@@ -997,7 +1108,10 @@
         s.state = "running";
         renderScenarioList();
         try {
-          const res = await fetch("/api/scenarios/" + encodeURIComponent(s.name), { method: "POST" });
+          const res = await fetch(
+            "/api/scenarios/" + encodeURIComponent(s.name) + adapterQuery(),
+            { method: "POST" },
+          );
           const result = await res.json();
           if (!res.ok) {
             s.state = "err";
@@ -1076,8 +1190,10 @@
       });
 
       initSessions();
-      loadStatus();
-      loadScenarios();
+      loadAdapters().then(() => {
+        loadStatus();
+        loadScenarios();
+      });
     </script>
   </body>
 </html>

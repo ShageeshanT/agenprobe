@@ -4,10 +4,11 @@ import { fileURLToPath } from "node:url";
 
 import express, { type Request, type Response } from "express";
 
+import { HermesAdapter } from "../adapters/hermes-adapter.js";
 import { OpenClawAdapter } from "../adapters/openclaw-adapter.js";
 import type { BotAdapter, BotReply } from "../core/bot-adapter.js";
 import {
-  loadScenariosFromDir,
+  loadScenariosForAdapter,
   ScenarioLoadError,
 } from "../core/scenario-loader.js";
 import { runScenario } from "../core/scenario-runner.js";
@@ -28,73 +29,146 @@ export interface WebServerOptions {
   scenarioDir?: string;
 }
 
+type AdapterKind = "openclaw" | "hermes";
+
+interface AdapterEntry {
+  kind: AdapterKind;
+  /** Display label for UI. */
+  label: string;
+  /** Short description shown in the picker. */
+  description: string;
+  /** Whether this adapter has all the env vars it needs. */
+  configured: boolean;
+  /** Why it's not configured, if applicable. */
+  configurationError?: string;
+  /** Lazy factory — the adapter itself is only built on first use. */
+  build?: () => BotAdapter;
+  /** Human-readable "bot identity" for the status card. */
+  botLabel: string;
+  /** The transport URL or connection string shown in the status card. */
+  transport: string;
+}
+
+interface AdapterRuntime {
+  entry: AdapterEntry;
+  instance?: BotAdapter;
+  connected: boolean;
+  connectPromise?: Promise<void>;
+  connectError?: string;
+}
+
 /**
- * AgentProbe dashboard — minimal Express server that exposes:
+ * AgentProbe dashboard — Express server that speaks to both OpenClaw and
+ * Hermes through a shared BotAdapter interface.
  *
- *   GET  /                     → static HTML UI
- *   GET  /api/status           → gateway URL, agent id, connection state
- *   POST /api/chat             → send one message, return reply + events
- *   GET  /api/scenarios        → list available YAML scenarios
- *   POST /api/scenarios/:name  → run one scenario, return the full result
- *   POST /api/scenarios        → run every scenario, return the suite result
+ * Routes:
+ *   GET  /                              static HTML UI
+ *   GET  /api/adapters                  list available adapters + configured flag
+ *   GET  /api/status?adapter=<kind>     connection state for one adapter
+ *   POST /api/chat                      { adapter, text, sessionKey? }
+ *   GET  /api/scenarios?adapter=<kind>  list scenarios for one adapter
+ *   POST /api/scenarios/:name?adapter=<kind>   run one
+ *   POST /api/scenarios?adapter=<kind>         run whole suite for one adapter
  *
- * The server holds a single long-lived OpenClawAdapter. All API endpoints
- * share that one connection, which means we pay the handshake cost once at
- * boot instead of per request.
+ * Adapter lifecycle:
+ *   - OpenClaw is connected eagerly at server boot (fast handshake).
+ *   - Hermes is connected lazily on first request (every SSH call costs
+ *     a few seconds, so we don't pay the price until the user actually
+ *     picks it).
+ *
+ * The `adapter` param defaults to "openclaw" on every route so older
+ * clients that don't know about the picker continue to work.
  */
 export async function startWebServer(opts: WebServerOptions = {}): Promise<void> {
   const port = opts.port ?? 4000;
   const scenarioDir = opts.scenarioDir ?? DEFAULT_SCENARIO_DIR;
 
-  const gatewayUrl = process.env.OPENCLAW_GATEWAY_URL;
-  if (!gatewayUrl) {
-    throw new Error("OPENCLAW_GATEWAY_URL is not set. See README for setup.");
+  const entries = buildAdapterEntries();
+  const runtime = new Map<AdapterKind, AdapterRuntime>();
+  for (const entry of entries) {
+    runtime.set(entry.kind, { entry, connected: false });
   }
-  const agentId = process.env.OPENCLAW_AGENT_ID ?? "main";
-  const token = process.env.OPENCLAW_GATEWAY_TOKEN;
-  const devicePrivateKeyPem = existsSync(DEFAULT_KEY_PATH)
-    ? readFileSync(DEFAULT_KEY_PATH, "utf8")
-    : undefined;
 
-  const adapter: BotAdapter = new OpenClawAdapter({
-    gatewayUrl,
-    agentId,
-    clientName: "agentprobe-web",
-    ...(token ? { token } : {}),
-    ...(devicePrivateKeyPem ? { devicePrivateKeyPem } : {}),
-  });
-
-  let connectionError: string | undefined;
-  let connected = false;
-  try {
-    await adapter.connect();
-    connected = true;
-    console.log(`[web] connected to ${gatewayUrl} as agent "${agentId}"`);
-  } catch (err) {
-    connectionError = err instanceof Error ? err.message : String(err);
-    console.error(`[web] handshake failed: ${connectionError}`);
-    console.error("[web] server will start anyway; /api/status will report the error");
+  // Eagerly connect OpenClaw at boot — the handshake is quick and the UI
+  // defaults to it, so the first page load shouldn't stall on a cold connect.
+  const openclawRt = runtime.get("openclaw");
+  if (openclawRt?.entry.configured) {
+    try {
+      await getOrConnect(openclawRt);
+      console.log(
+        `[web] connected to openclaw at ${openclawRt.entry.transport}`,
+      );
+    } catch (err) {
+      console.error(
+        `[web] openclaw connect failed at boot: ${(err as Error).message}`,
+      );
+      console.error(`[web] server will start anyway; /api/status reports the error`);
+    }
   }
 
   const app = express();
   app.use(express.json({ limit: "1mb" }));
   app.use(express.static(PUBLIC_DIR));
 
-  app.get("/api/status", (_req, res) => {
+  app.get("/api/adapters", (_req, res) => {
     res.json({
-      gatewayUrl,
-      agentId,
-      connected,
-      connectionError: connectionError ?? null,
+      adapters: entries.map((e) => ({
+        kind: e.kind,
+        label: e.label,
+        description: e.description,
+        configured: e.configured,
+        configurationError: e.configurationError ?? null,
+        botLabel: e.botLabel,
+        transport: e.transport,
+      })),
+    });
+  });
+
+  app.get("/api/status", async (req, res) => {
+    const kind = resolveAdapterKind(req);
+    const rt = runtime.get(kind);
+    if (!rt) {
+      res.status(400).json({ error: `unknown adapter: ${kind}` });
+      return;
+    }
+    if (!rt.entry.configured) {
+      res.json({
+        adapter: kind,
+        botLabel: rt.entry.botLabel,
+        transport: rt.entry.transport,
+        connected: false,
+        connectionError: rt.entry.configurationError ?? "not configured",
+        scenarioDir,
+      });
+      return;
+    }
+    // Lazily connect Hermes on first status check so the UI reflects a real
+    // connection state once the user switches to it.
+    try {
+      await getOrConnect(rt);
+    } catch {
+      /* error is already captured on rt */
+    }
+    res.json({
+      adapter: kind,
+      botLabel: rt.entry.botLabel,
+      transport: rt.entry.transport,
+      connected: rt.connected,
+      connectionError: rt.connectError ?? null,
       scenarioDir,
     });
   });
 
   app.post("/api/chat", async (req: Request, res: Response) => {
-    if (!connected) {
-      res.status(503).json({ error: "bot adapter is not connected", details: connectionError ?? null });
+    const kind = resolveAdapterKind(req);
+    const rt = runtime.get(kind);
+    if (!rt || !rt.entry.configured) {
+      res
+        .status(503)
+        .json({ error: `adapter "${kind}" is not configured`, details: rt?.entry.configurationError ?? null });
       return;
     }
+
     const text = typeof req.body?.text === "string" ? req.body.text : "";
     if (!text.trim()) {
       res.status(400).json({ error: "body.text must be a non-empty string" });
@@ -106,11 +180,13 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<void>
         : undefined;
 
     try {
+      const adapter = await getOrConnect(rt);
       const reply: BotReply = await adapter.sendMessage({
         text,
         ...(sessionKey ? { sessionKey } : {}),
       });
       res.json({
+        adapter: kind,
         text: reply.text,
         responseTimeMs: reply.responseTimeMs,
         events: reply.events,
@@ -122,10 +198,12 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<void>
     }
   });
 
-  app.get("/api/scenarios", (_req, res) => {
+  app.get("/api/scenarios", (req, res) => {
+    const kind = resolveAdapterKind(req);
     try {
-      const scenarios = loadScenariosFromDir(scenarioDir);
+      const scenarios = loadScenariosForAdapter(scenarioDir, kind);
       res.json({
+        adapter: kind,
         scenarios: scenarios.map((s) => summarizeScenario(s)),
       });
     } catch (err) {
@@ -138,17 +216,20 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<void>
   });
 
   app.post("/api/scenarios/:name", async (req: Request, res: Response) => {
-    if (!connected) {
-      res.status(503).json({ error: "bot adapter is not connected" });
+    const kind = resolveAdapterKind(req);
+    const rt = runtime.get(kind);
+    if (!rt || !rt.entry.configured) {
+      res.status(503).json({ error: `adapter "${kind}" is not configured` });
       return;
     }
     try {
-      const scenarios = loadScenariosFromDir(scenarioDir);
+      const scenarios = loadScenariosForAdapter(scenarioDir, kind);
       const scenario = scenarios.find((s) => s.name === req.params.name);
       if (!scenario) {
-        res.status(404).json({ error: `no scenario named "${req.params.name}"` });
+        res.status(404).json({ error: `no scenario named "${req.params.name}" for adapter "${kind}"` });
         return;
       }
+      const adapter = await getOrConnect(rt);
       const result = await runScenario(adapter, scenario);
       res.json(result);
     } catch (err) {
@@ -156,19 +237,23 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<void>
     }
   });
 
-  app.post("/api/scenarios", async (_req: Request, res: Response) => {
-    if (!connected) {
-      res.status(503).json({ error: "bot adapter is not connected" });
+  app.post("/api/scenarios", async (req: Request, res: Response) => {
+    const kind = resolveAdapterKind(req);
+    const rt = runtime.get(kind);
+    if (!rt || !rt.entry.configured) {
+      res.status(503).json({ error: `adapter "${kind}" is not configured` });
       return;
     }
     try {
-      const scenarios = loadScenariosFromDir(scenarioDir);
+      const scenarios = loadScenariosForAdapter(scenarioDir, kind);
+      const adapter = await getOrConnect(rt);
       const results = [];
       for (const scenario of scenarios) {
         results.push(await runScenario(adapter, scenario));
       }
       const passed = results.filter((r) => r.passed).length;
       res.json({
+        adapter: kind,
         passed,
         total: results.length,
         results,
@@ -183,18 +268,146 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<void>
     console.log(`[web] scenarios: ${scenarioDir}`);
   });
 
-  // Graceful shutdown so the WS doesn't leak on Ctrl+C.
+  // Graceful shutdown so connections don't leak on Ctrl+C.
   const shutdown = async () => {
     console.log("\n[web] shutting down");
-    try {
-      await adapter.disconnect();
-    } catch {
-      /* ignore */
+    for (const rt of runtime.values()) {
+      if (rt.instance) {
+        try {
+          await rt.instance.disconnect();
+        } catch {
+          /* ignore */
+        }
+      }
     }
     process.exit(0);
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+}
+
+// -------- adapter construction --------
+
+function buildAdapterEntries(): AdapterEntry[] {
+  return [buildOpenClawEntry(), buildHermesEntry()];
+}
+
+function buildOpenClawEntry(): AdapterEntry {
+  const gatewayUrl = process.env.OPENCLAW_GATEWAY_URL;
+  const agentId = process.env.OPENCLAW_AGENT_ID ?? "main";
+  const token = process.env.OPENCLAW_GATEWAY_TOKEN;
+  const devicePrivateKeyPem = existsSync(DEFAULT_KEY_PATH)
+    ? readFileSync(DEFAULT_KEY_PATH, "utf8")
+    : undefined;
+
+  if (!gatewayUrl) {
+    return {
+      kind: "openclaw",
+      label: "OpenClaw",
+      description: "Native WebSocket RPC with Ed25519 device attestation.",
+      configured: false,
+      configurationError: "OPENCLAW_GATEWAY_URL is not set",
+      botLabel: "—",
+      transport: "not configured",
+    };
+  }
+
+  return {
+    kind: "openclaw",
+    label: "OpenClaw",
+    description: "Native WebSocket RPC with Ed25519 device attestation.",
+    configured: true,
+    botLabel: `agent: ${agentId}`,
+    transport: gatewayUrl,
+    build: () =>
+      new OpenClawAdapter({
+        gatewayUrl,
+        agentId,
+        clientName: "agentprobe-web",
+        ...(token ? { token } : {}),
+        ...(devicePrivateKeyPem ? { devicePrivateKeyPem } : {}),
+      }),
+  };
+}
+
+function buildHermesEntry(): AdapterEntry {
+  const project = process.env.HERMES_RAILWAY_PROJECT;
+  const environment = process.env.HERMES_RAILWAY_ENVIRONMENT;
+  const service = process.env.HERMES_RAILWAY_SERVICE;
+
+  if (!project || !environment || !service) {
+    return {
+      kind: "hermes",
+      label: "Hermes",
+      description: "Shell-out to `hermes chat` over railway ssh.",
+      configured: false,
+      configurationError:
+        "HERMES_RAILWAY_PROJECT / ENVIRONMENT / SERVICE not set",
+      botLabel: "—",
+      transport: "not configured",
+    };
+  }
+
+  return {
+    kind: "hermes",
+    label: "Hermes",
+    description: "Shell-out to `hermes chat` over railway ssh.",
+    configured: true,
+    botLabel: `service: ${service.slice(0, 8)}…`,
+    transport: `railway ssh → ${service.slice(0, 8)}…`,
+    build: () =>
+      new HermesAdapter({
+        railwayProject: project,
+        railwayEnvironment: environment,
+        railwayService: service,
+      }),
+  };
+}
+
+// -------- runtime helpers --------
+
+async function getOrConnect(rt: AdapterRuntime): Promise<BotAdapter> {
+  if (!rt.entry.build) {
+    throw new Error(`adapter "${rt.entry.kind}" is not configured`);
+  }
+  if (rt.instance && rt.connected) return rt.instance;
+
+  // De-duplicate in-flight connects so two simultaneous requests don't
+  // both run the handshake. This matters for Hermes where the handshake
+  // involves a real SSH invocation.
+  if (rt.connectPromise) {
+    await rt.connectPromise;
+    if (!rt.instance) throw new Error(rt.connectError ?? "connect failed");
+    return rt.instance;
+  }
+
+  const instance = rt.entry.build();
+  rt.instance = instance;
+  rt.connectPromise = (async () => {
+    try {
+      await instance.connect();
+      rt.connected = true;
+      delete rt.connectError;
+    } catch (err) {
+      rt.connected = false;
+      rt.connectError = err instanceof Error ? err.message : String(err);
+      throw err;
+    } finally {
+      delete rt.connectPromise;
+    }
+  })();
+
+  await rt.connectPromise;
+  return instance;
+}
+
+function resolveAdapterKind(req: Request): AdapterKind {
+  const raw =
+    (typeof req.query?.adapter === "string" && req.query.adapter) ||
+    (typeof req.body?.adapter === "string" && req.body.adapter) ||
+    "openclaw";
+  if (raw === "openclaw" || raw === "hermes") return raw;
+  return "openclaw";
 }
 
 function summarizeScenario(s: Scenario) {
