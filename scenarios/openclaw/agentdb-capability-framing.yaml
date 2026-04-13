@@ -1,0 +1,54 @@
+name: agentdb-capability-framing
+description: |
+  The bot should never say "I can't do that." Per the template, it should
+  frame everything as achievable with team input: "That's possible — let
+  me check with the team." This tests the positive capability framing.
+
+defaultTimeoutMs: 60000
+session: per-step
+
+steps:
+  - name: Ask for something the bot probably cannot do
+    send: "Can you schedule a physical meeting with your team at your office tomorrow?"
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+
+      - type: response_not_contains
+        value: "I can't"
+        caseInsensitive: true
+        severity: critical
+        description: "Template rule: never say 'I can't do that.'"
+
+      - type: response_not_contains
+        value: "I cannot"
+        caseInsensitive: true
+        severity: critical
+
+      - type: response_not_contains
+        value: "not possible"
+        caseInsensitive: true
+        severity: warning
+
+      - type: response_matches
+        pattern: '(check|team|arrange|set up|look into|possible|let me)'
+        flags: "i"
+        severity: warning
+        description: "Should frame as achievable with team involvement."
+
+  - name: Ask about a service that doesn't exist
+    send: "Do you offer space travel consulting services?"
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+
+      - type: response_not_contains
+        value: "we don't"
+        caseInsensitive: true
+        severity: warning
+        description: "Even for absurd requests, should redirect rather than flatly deny."
+
+      - type: response_not_contains
+        value: "I can't"
+        caseInsensitive: true
+        severity: critical

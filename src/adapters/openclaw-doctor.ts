@@ -819,6 +819,252 @@ const checkComposioToolsList: DoctorCheck = {
   },
 };
 
+// -------- workspace integrity --------
+
+const checkWorkspaceFiles: DoctorCheck = {
+  id: "workspace_files",
+  label: "Required workspace files are present",
+  category: "agentdb",
+  applies: (ctx) => Boolean(ctx.coords),
+  async run(ctx) {
+    if (!ctx.coords) return { status: "skip", detail: "no coords" };
+    const script = `
+cat > /tmp/agentprobe-doctor-ws.js <<'WS_EOF'
+const fs = require("fs");
+const path = require("path");
+const home = process.env.HOME || "/root";
+const ws = process.env.OPENCLAW_WORKSPACE_DIR || path.join(home, ".openclaw", "workspace");
+const required = [
+  "SOUL.md", "MEMORY.md", "IDENTITY.md", "HEARTBEAT.md",
+  "TOOLS.md", "AGENTS.md", "USER.md"
+];
+const found = [];
+const missing = [];
+for (const f of required) {
+  const fp = path.join(ws, f);
+  if (fs.existsSync(fp) && fs.statSync(fp).size > 0) found.push(f);
+  else missing.push(f);
+}
+const dirs = [".learnings", "memory"];
+const missingDirs = [];
+for (const d of dirs) {
+  if (!fs.existsSync(path.join(ws, d))) missingDirs.push(d);
+}
+console.log("AGENTPROBE_WS=" + JSON.stringify({ ws, found, missing, missingDirs }));
+WS_EOF
+node /tmp/agentprobe-doctor-ws.js
+rm -f /tmp/agentprobe-doctor-ws.js
+`.trim();
+    const { stdout, code } = await runRemoteCommand(ctx.coords, script, 15_000);
+    if (code !== 0) return { status: "fail", detail: `remote exit ${code}` };
+    const m = stdout.match(/AGENTPROBE_WS=(\{.*\})/);
+    if (!m || !m[1]) return { status: "fail", detail: "no parseable output" };
+    const data = JSON.parse(m[1]) as {
+      ws: string; found: string[]; missing: string[]; missingDirs: string[];
+    };
+    const issues = [...data.missing, ...data.missingDirs.map((d: string) => `${d}/`)];
+    if (issues.length > 0) {
+      return {
+        status: "fail",
+        detail: `missing: ${issues.join(", ")}`,
+        data,
+      };
+    }
+    return {
+      status: "ok",
+      detail: `${data.found.length} files present in ${data.ws}`,
+      data,
+    };
+  },
+};
+
+// -------- agentdb config compliance --------
+
+const checkAgentDBConfig: DoctorCheck = {
+  id: "agentdb_config_compliance",
+  label: "AgentDB safety flags are enabled",
+  category: "agentdb",
+  applies: (ctx) => Boolean(ctx.coords),
+  async run(ctx) {
+    if (!ctx.coords) return { status: "skip", detail: "no coords" };
+    const script = `
+cat > /tmp/agentprobe-doctor-dbcfg.js <<'DBCFG_EOF'
+const fs = require("fs");
+const c = JSON.parse(fs.readFileSync("/data/.openclaw/openclaw.json", "utf8"));
+const entry = c.plugins && c.plugins.entries && c.plugins.entries.agentdb;
+const cfg = entry && entry.config;
+if (!cfg) { console.log("AGENTPROBE_DBCFG=" + JSON.stringify({ error: "no agentdb config" })); process.exit(0); }
+console.log("AGENTPROBE_DBCFG=" + JSON.stringify({
+  enabled: Boolean(entry.enabled),
+  blockOnUnknownNumber: Boolean(cfg.blockOnUnknownNumber),
+  blockOnRoutingConfusion: Boolean(cfg.blockOnRoutingConfusion),
+  injectContactContext: Boolean(cfg.injectContactContext),
+  allowAgentSchemaChanges: Boolean(cfg.allowAgentSchemaChanges)
+}));
+DBCFG_EOF
+node /tmp/agentprobe-doctor-dbcfg.js
+rm -f /tmp/agentprobe-doctor-dbcfg.js
+`.trim();
+    const { stdout, code } = await runRemoteCommand(ctx.coords, script, 15_000);
+    if (code !== 0) return { status: "fail", detail: `remote exit ${code}` };
+    const m = stdout.match(/AGENTPROBE_DBCFG=(\{.*\})/);
+    if (!m || !m[1]) return { status: "fail", detail: "no parseable output" };
+    const data = JSON.parse(m[1]) as Record<string, boolean | string>;
+    if ("error" in data) return { status: "fail", detail: String(data.error) };
+
+    const critical = [];
+    if (!data.blockOnUnknownNumber) critical.push("blockOnUnknownNumber is OFF");
+    if (!data.blockOnRoutingConfusion) critical.push("blockOnRoutingConfusion is OFF");
+    if (!data.injectContactContext) critical.push("injectContactContext is OFF");
+
+    if (critical.length > 0) {
+      return {
+        status: "fail",
+        detail: `safety flags missing: ${critical.join(", ")}`,
+        data,
+      };
+    }
+    return {
+      status: "ok",
+      detail: "all safety flags enabled (blockOnUnknown, blockOnRouting, injectContext)",
+      data,
+    };
+  },
+};
+
+// -------- skill installation --------
+
+const checkSkillsInstalled: DoctorCheck = {
+  id: "skills_installed",
+  label: "Required skills are installed",
+  category: "plugins",
+  applies: (ctx) => Boolean(ctx.coords),
+  async run(ctx) {
+    if (!ctx.coords) return { status: "skip", detail: "no coords" };
+    const script = `
+cat > /tmp/agentprobe-doctor-skills.js <<'SKILLS_EOF'
+const fs = require("fs");
+const path = require("path");
+const home = process.env.HOME || "/root";
+const checks = [
+  { name: "agentdb-skill", path: "/data/.openclaw/plugins/agentdb/skills/agentdb/SKILL.md" },
+  { name: "self-improving", path: path.join(home, "self-improving", "SKILL.md") },
+];
+const found = [];
+const missing = [];
+for (const c of checks) {
+  if (fs.existsSync(c.path)) found.push(c.name);
+  else missing.push(c.name);
+}
+// Also check skills/ directory for any installed skills
+let skillCount = 0;
+const skillsDir = "/data/.openclaw/skills";
+try {
+  if (fs.existsSync(skillsDir)) {
+    skillCount = fs.readdirSync(skillsDir).filter(f => fs.statSync(path.join(skillsDir, f)).isDirectory()).length;
+  }
+} catch {}
+console.log("AGENTPROBE_SKILLS=" + JSON.stringify({ found, missing, totalSkillDirs: skillCount }));
+SKILLS_EOF
+node /tmp/agentprobe-doctor-skills.js
+rm -f /tmp/agentprobe-doctor-skills.js
+`.trim();
+    const { stdout, code } = await runRemoteCommand(ctx.coords, script, 15_000);
+    if (code !== 0) return { status: "fail", detail: `remote exit ${code}` };
+    const m = stdout.match(/AGENTPROBE_SKILLS=(\{.*\})/);
+    if (!m || !m[1]) return { status: "fail", detail: "no parseable output" };
+    const data = JSON.parse(m[1]) as {
+      found: string[]; missing: string[]; totalSkillDirs: number;
+    };
+    if (data.missing.length > 0) {
+      return {
+        status: "warn",
+        detail: `missing skill(s): ${data.missing.join(", ")}`,
+        data,
+      };
+    }
+    return {
+      status: "ok",
+      detail: `${data.found.length} required skill(s) present, ${data.totalSkillDirs} total in skills/`,
+      data,
+    };
+  },
+};
+
+// -------- forwarder + owner contacts --------
+
+const checkForwarderList: DoctorCheck = {
+  id: "forwarder_list",
+  label: "Forwarder list has at least one contact",
+  category: "agentdb",
+  applies: (ctx) => Boolean(ctx.coords),
+  async run(ctx) {
+    if (!ctx.coords) return { status: "skip", detail: "no coords" };
+    try {
+      const result = await queryAgentDB({
+        coords: ctx.coords,
+        agentId: ctx.agentId,
+        sql: "SELECT COUNT(*) as n FROM contacts WHERE role = 'forwarder' AND is_active = 1",
+      });
+      const count = (result.rows[0] as Record<string, unknown>)?.n;
+      const n = typeof count === "number" ? count : 0;
+      if (n === 0) {
+        return {
+          status: "warn",
+          detail: "no forwarders in AgentDB — quotation requests won't be routed to anyone",
+          data: { forwarderCount: n },
+        };
+      }
+      return {
+        status: "ok",
+        detail: `${n} active forwarder(s)`,
+        data: { forwarderCount: n },
+      };
+    } catch (err) {
+      return {
+        status: "warn",
+        detail: `couldn't query forwarders: ${(err as Error).message}`,
+      };
+    }
+  },
+};
+
+const checkOwnerContact: DoctorCheck = {
+  id: "owner_contact",
+  label: "Owner is registered as admin in AgentDB",
+  category: "agentdb",
+  applies: (ctx) => Boolean(ctx.coords),
+  async run(ctx) {
+    if (!ctx.coords) return { status: "skip", detail: "no coords" };
+    try {
+      const result = await queryAgentDB({
+        coords: ctx.coords,
+        agentId: ctx.agentId,
+        sql: "SELECT COUNT(*) as n FROM contacts WHERE access_level = 'admin' AND is_active = 1",
+      });
+      const count = (result.rows[0] as Record<string, unknown>)?.n;
+      const n = typeof count === "number" ? count : 0;
+      if (n === 0) {
+        return {
+          status: "fail",
+          detail: "no admin contacts in AgentDB — bot has no owner to escalate to",
+          data: { adminCount: n },
+        };
+      }
+      return {
+        status: "ok",
+        detail: `${n} admin contact(s)`,
+        data: { adminCount: n },
+      };
+    } catch (err) {
+      return {
+        status: "warn",
+        detail: `couldn't query admin contacts: ${(err as Error).message}`,
+      };
+    }
+  },
+};
+
 // -------- export --------
 
 /**
@@ -828,16 +1074,29 @@ const checkComposioToolsList: DoctorCheck = {
  */
 export function buildOpenClawDoctorChecks(): DoctorCheck[] {
   return [
+    // Gateway
     checkGatewayHealth,
     checkPairingPresent,
+    // AgentDB
     checkAgentDBPresent,
     checkAgentDBSchema,
+    checkAgentDBConfig,
+    checkForwarderList,
+    checkOwnerContact,
+    // Workspace
+    checkWorkspaceFiles,
+    // Plugins & Skills
     checkPluginsEnabled,
+    checkSkillsInstalled,
+    // Channels
     checkChannelsConfigured,
+    // Composio
     checkComposioKeyConfigured,
     checkComposioMcpReachable,
     checkComposioToolsList,
+    // Cron
     checkCronJobs,
+    // Logs & System
     checkRecentErrors,
     checkDiskSpace,
   ];
