@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import "dotenv/config";
 
 import { HermesAdapter } from "../src/adapters/hermes-adapter.js";
+import { queryAgentDB } from "../src/adapters/openclaw-agentdb.js";
 import { OpenClawAdapter } from "../src/adapters/openclaw-adapter.js";
 import type { BotAdapter } from "../src/core/bot-adapter.js";
 import { createReportStore } from "../src/core/report-store.js";
@@ -30,7 +31,10 @@ import {
   loadScenariosFromDir,
   ScenarioLoadError,
 } from "../src/core/scenario-loader.js";
-import { runScenario } from "../src/core/scenario-runner.js";
+import {
+  runScenario,
+  type PlatformHandlers,
+} from "../src/core/scenario-runner.js";
 import type { ScenarioResult } from "../src/core/scenario.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -66,6 +70,43 @@ function parseArgs(argv: string[]): CliArgs {
     }
   }
   return args;
+}
+
+/**
+ * Build platform-specific async assertion handlers for the scenario
+ * runner. Currently only OpenClaw exposes AgentDB reads — and only if
+ * the RAILWAY_PROJECT/ENVIRONMENT/SERVICE env vars are set so the
+ * helper can SSH into the container. Hermes has nothing equivalent,
+ * so it returns an empty handlers object and agentdb_query assertions
+ * will be skipped cleanly.
+ */
+function buildPlatformHandlers(
+  kind: "openclaw" | "hermes",
+): PlatformHandlers {
+  if (kind !== "openclaw") return {};
+  const project = process.env.RAILWAY_PROJECT;
+  const environment = process.env.RAILWAY_ENVIRONMENT;
+  const service = process.env.RAILWAY_SERVICE;
+  if (!project || !environment || !service) return {};
+  const coords = { project, environment, service };
+  const agentId = process.env.OPENCLAW_AGENT_ID ?? "main";
+  return {
+    queryAgentDB: async (assertion) => {
+      try {
+        const result = await queryAgentDB({
+          coords,
+          agentId,
+          sql: assertion.sql,
+          ...(assertion.params ? { params: assertion.params } : {}),
+        });
+        return { rows: result.rows, rowCount: result.rowCount };
+      } catch (err) {
+        return {
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+  };
 }
 
 function buildAdapter(kind: "openclaw" | "hermes"): BotAdapter {
@@ -136,6 +177,7 @@ async function main() {
   }
 
   const adapter = buildAdapter(adapterKind);
+  const platformHandlers = buildPlatformHandlers(adapterKind);
 
   console.log(`connecting via adapter: ${adapterKind}`);
   try {
@@ -145,6 +187,9 @@ async function main() {
     process.exit(2);
   }
   console.log(`connected. running ${scenarios.length} scenario(s) against ${adapter.name}.`);
+  if (platformHandlers.queryAgentDB) {
+    console.log("platform handlers: agentdb_query enabled");
+  }
 
   const runStartedAt = Date.now();
   const results: ScenarioResult[] = [];
@@ -155,7 +200,7 @@ async function main() {
     if (scenario.description) console.log(`  ${scenario.description}`);
     console.log("=".repeat(72));
 
-    const result = await runScenario(adapter, scenario);
+    const result = await runScenario(adapter, scenario, { platformHandlers });
     results.push(result);
     printScenarioResult(result);
   }

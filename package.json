@@ -14,6 +14,7 @@
     "smoke:hermes": "tsx scripts/smoke-hermes.ts",
     "scenario": "tsx scripts/run-scenario.ts",
     "scenarios": "tsx scripts/run-scenario.ts scenarios",
+    "doctor": "tsx scripts/run-doctor.ts",
     "web": "tsx scripts/run-web.ts"
   },
   "dependencies": {

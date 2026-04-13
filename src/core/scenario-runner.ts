@@ -1,16 +1,45 @@
 import { randomUUID } from "node:crypto";
 
 import type { BotAdapter } from "./bot-adapter.js";
-import { evaluateAssertion, summarizeAssertions } from "./assertions.js";
+import {
+  evaluateAgentDBAssertion,
+  evaluateAssertion,
+  skipAgentDBAssertion,
+  summarizeAssertions,
+} from "./assertions.js";
 import type {
+  AgentDBQueryAssertion,
+  AssertionResult,
   Scenario,
   ScenarioResult,
   StepResult,
 } from "./scenario.js";
 
+/**
+ * Platform-specific async assertion handlers. The runner calls these
+ * when it encounters an assertion that needs side-effects (e.g. an
+ * `agentdb_query` that has to SSH into the container).
+ *
+ * When a handler is missing for an assertion type that requires one,
+ * the assertion is marked as `info: skipped` so multi-platform suites
+ * don't fail just because one adapter lacks the feature.
+ */
+export interface PlatformHandlers {
+  /**
+   * Given an `agentdb_query` assertion, run the SQL and return
+   * { rows, rowCount } — or { error } on failure. The pure assertion
+   * evaluator in assertions.ts turns that into an AssertionResult.
+   */
+  queryAgentDB?: (assertion: AgentDBQueryAssertion) => Promise<
+    { rows: Record<string, unknown>[]; rowCount: number } | { error: string }
+  >;
+}
+
 export interface RunScenarioOptions {
   /** Called after each step finishes (for UI progress streaming). */
   onStepComplete?: (step: StepResult) => void;
+  /** Platform-specific handlers for assertions that need side effects. */
+  platformHandlers?: PlatformHandlers;
 }
 
 /**
@@ -54,9 +83,37 @@ export async function runScenario(
         timeoutMs,
       });
 
-      const assertionResults = step.assertions.map((a) =>
-        evaluateAssertion(a, reply),
-      );
+      // Evaluate assertions one at a time. Sync response-based ones go
+      // through evaluateAssertion; async platform-specific ones (currently
+      // just agentdb_query) get dispatched to the matching handler in
+      // opts.platformHandlers. Missing handlers produce a "skipped" info
+      // result so cross-platform suites don't break.
+      const assertionResults: AssertionResult[] = [];
+      for (const a of step.assertions) {
+        if (a.type === "agentdb_query") {
+          if (opts.platformHandlers?.queryAgentDB) {
+            try {
+              const queryResult = await opts.platformHandlers.queryAgentDB(a);
+              assertionResults.push(evaluateAgentDBAssertion(a, queryResult));
+            } catch (err) {
+              assertionResults.push(
+                evaluateAgentDBAssertion(a, {
+                  error: err instanceof Error ? err.message : String(err),
+                }),
+              );
+            }
+          } else {
+            assertionResults.push(
+              skipAgentDBAssertion(
+                a,
+                "adapter does not support AgentDB queries",
+              ),
+            );
+          }
+        } else {
+          assertionResults.push(evaluateAssertion(a, reply));
+        }
+      }
       const summary = summarizeAssertions(assertionResults);
       criticalFailures += summary.critical;
       warningFailures += summary.warnings;

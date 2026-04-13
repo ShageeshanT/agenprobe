@@ -263,12 +263,127 @@ function parseAssertion(
       return attach({ type });
     }
 
+    case "tool_called":
+    case "tool_not_called": {
+      if (typeof raw.tool !== "string" || raw.tool.trim() === "") {
+        throw new ScenarioLoadError(
+          `${label}.tool must be a non-empty string`,
+          filePath,
+        );
+      }
+      return attach({ type, tool: raw.tool });
+    }
+
+    case "tool_call_count": {
+      const base: Assertion = { type };
+      const b = base as {
+        tool?: string;
+        expectCount?: number;
+        expectMin?: number;
+        expectMax?: number;
+      };
+      if (typeof raw.tool === "string") b.tool = raw.tool;
+      if (typeof raw.expectCount === "number") b.expectCount = raw.expectCount;
+      if (typeof raw.expectMin === "number") b.expectMin = raw.expectMin;
+      if (typeof raw.expectMax === "number") b.expectMax = raw.expectMax;
+      return attach(base);
+    }
+
+    case "tool_params_contain": {
+      if (typeof raw.tool !== "string" || raw.tool.trim() === "") {
+        throw new ScenarioLoadError(
+          `${label}.tool must be a non-empty string`,
+          filePath,
+        );
+      }
+      if (typeof raw.value !== "string") {
+        throw new ScenarioLoadError(
+          `${label}.value must be a string`,
+          filePath,
+        );
+      }
+      const base: Assertion = { type, tool: raw.tool, value: raw.value };
+      if (typeof raw.caseInsensitive === "boolean") {
+        (base as { caseInsensitive?: boolean }).caseInsensitive =
+          raw.caseInsensitive;
+      }
+      return attach(base);
+    }
+
+    case "agentdb_query": {
+      if (typeof raw.sql !== "string" || raw.sql.trim() === "") {
+        throw new ScenarioLoadError(
+          `${label}.sql must be a non-empty string`,
+          filePath,
+        );
+      }
+      const base: Assertion = { type, sql: raw.sql };
+      const b = base as AssertionWithAgentDBFields;
+      if (Array.isArray(raw.params)) {
+        const cleanedParams: (string | number | boolean | null)[] = [];
+        for (let k = 0; k < raw.params.length; k++) {
+          const p = raw.params[k];
+          if (
+            typeof p === "string" ||
+            typeof p === "number" ||
+            typeof p === "boolean" ||
+            p === null
+          ) {
+            cleanedParams.push(p);
+          } else {
+            throw new ScenarioLoadError(
+              `${label}.params[${k}] must be string | number | boolean | null`,
+              filePath,
+            );
+          }
+        }
+        b.params = cleanedParams;
+      }
+      if (typeof raw.expectRowCount === "number") {
+        b.expectRowCount = raw.expectRowCount;
+      }
+      if (typeof raw.expectMinRows === "number") {
+        b.expectMinRows = raw.expectMinRows;
+      }
+      if (typeof raw.expectMaxRows === "number") {
+        b.expectMaxRows = raw.expectMaxRows;
+      }
+      if (isObject(raw.expectFirstRow)) {
+        const row: Record<string, string | number | boolean | null> = {};
+        for (const [k, v] of Object.entries(raw.expectFirstRow)) {
+          if (
+            typeof v === "string" ||
+            typeof v === "number" ||
+            typeof v === "boolean" ||
+            v === null
+          ) {
+            row[k] = v;
+          } else {
+            throw new ScenarioLoadError(
+              `${label}.expectFirstRow.${k} must be string | number | boolean | null`,
+              filePath,
+            );
+          }
+        }
+        b.expectFirstRow = row;
+      }
+      return attach(base);
+    }
+
     default:
       throw new ScenarioLoadError(
         `${label}.type "${type}" is not a known assertion type`,
         filePath,
       );
   }
+}
+
+interface AssertionWithAgentDBFields {
+  params?: (string | number | boolean | null)[];
+  expectRowCount?: number;
+  expectMinRows?: number;
+  expectMaxRows?: number;
+  expectFirstRow?: Record<string, string | number | boolean | null>;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

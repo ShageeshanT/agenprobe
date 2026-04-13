@@ -1,0 +1,116 @@
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "anthropic/claude-sonnet-4-6",
+        "fallbacks": ["anthropic/claude-opus-4-6"]
+      },
+      "models": {
+        "anthropic/claude-opus-4-6": {},
+        "anthropic/claude-sonnet-4-6": {}
+      },
+      "workspace": "{{WORKSPACE_PATH}}",
+      "userTimezone": "{{TIMEZONE}}",
+      "memorySearch": {
+        "enabled": true,
+        "extraPaths": [
+          ".learnings/",
+          "memory/"
+        ],
+        "provider": "gemini",
+        "remote": {
+          "apiKey": "{{GEMINI_API_KEY}}"
+        },
+        "model": "gemini-embedding-001",
+        "query": {
+          "hybrid": {
+            "enabled": true,
+            "vectorWeight": 0.7,
+            "textWeight": 0.3,
+            "candidateMultiplier": 3
+          }
+        }
+      },
+      "compaction": {
+        "mode": "safeguard"
+      },
+      "maxConcurrent": 4,
+      "subagents": {
+        "maxConcurrent": 8
+      }
+    }
+  },
+  "messages": {
+    "ackReactionScope": "group-mentions"
+  },
+  "commands": {
+    "native": "auto",
+    "nativeSkills": "auto",
+    "restart": true
+  },
+  "channels": {
+    "whatsapp": {
+      "dmPolicy": "allowlist",
+      "allowFrom": [],
+      "groupPolicy": "allowlist",
+      "mediaMaxMb": 50,
+      "debounceMs": 0
+    },
+    "telegram": {
+      "enabled": true,
+      "dmPolicy": "pairing",
+      "botToken": "{{TELEGRAM_BOT_TOKEN}}",
+      "groupPolicy": "allowlist",
+      "streamMode": "partial"
+    }
+  },
+  "gateway": {
+    "port": 18789,
+    "mode": "local",
+    "bind": "loopback",
+    "auth": {
+      "mode": "token",
+      "token": "{{GATEWAY_TOKEN}}"
+    },
+    "tailscale": {
+      "mode": "off",
+      "resetOnExit": false
+    },
+    "nodes": {
+      "denyCommands": [
+        "camera.snap",
+        "camera.clip",
+        "screen.record",
+        "calendar.add",
+        "contacts.add",
+        "reminders.add"
+      ]
+    }
+  },
+  "plugins": {
+    "load": {
+      "paths": [
+        "{{PLUGIN_PATH}}/agentdb"
+      ]
+    },
+    "entries": {
+      "telegram": {
+        "enabled": true
+      },
+      "whatsapp": {
+        "enabled": true
+      },
+      "agentdb": {
+        "enabled": true,
+        "config": {
+          "defaultCountryCode": "",
+          "geminiApiKey": "{{GEMINI_API_KEY}}",
+          "blockOnUnknownNumber": true,
+          "blockOnRoutingConfusion": true,
+          "injectContactContext": true,
+          "allowAgentSchemaChanges": true
+        }
+      }
+    }
+  }
+}

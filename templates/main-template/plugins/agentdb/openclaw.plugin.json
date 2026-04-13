@@ -1,0 +1,34 @@
+{
+  "id": "agentdb",
+  "name": "AgentDB — Structured Database for OpenClaw Agents",
+  "kind": "tool",
+  "skills": ["skills/agentdb"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "dbPath": { "type": "string", "default": "~/.openclaw/agentdb-{agentId}.sqlite" },
+      "defaultCountryCode": { "type": "string", "default": "" },
+      "blockOnUnknownNumber": { "type": "boolean", "default": true },
+      "blockOnRoutingConfusion": { "type": "boolean", "default": true },
+      "injectContactContext": { "type": "boolean", "default": true },
+      "allowAgentSchemaChanges": { "type": "boolean", "default": true },
+      "maxCustomTables": { "type": "number", "default": 20 },
+      "dangerousQueries": { "type": "string", "enum": ["block", "warn", "allow"], "default": "block" },
+      "geminiApiKey": { "type": "string", "description": "Google Gemini API key for semantic embeddings. Supports ${ENV_VAR} syntax." },
+      "embeddingModel": { "type": "string", "default": "text-embedding-004" }
+    }
+  },
+  "uiHints": {
+    "dbPath": { "label": "Database Path", "placeholder": "~/.openclaw/agentdb-{agentId}.sqlite" },
+    "defaultCountryCode": { "label": "Default Country Code", "placeholder": "+1" },
+    "geminiApiKey": { "label": "Gemini API Key", "sensitive": true },
+    "embeddingModel": { "label": "Embedding Model", "placeholder": "text-embedding-004" },
+    "blockOnUnknownNumber": { "label": "Block Unknown Phone Numbers" },
+    "blockOnRoutingConfusion": { "label": "Block Routing Confusion" },
+    "injectContactContext": { "label": "Inject Sender Context Before Prompt" },
+    "allowAgentSchemaChanges": { "label": "Allow Agent to Create Tables" },
+    "maxCustomTables": { "label": "Max Custom Tables" },
+    "dangerousQueries": { "label": "Dangerous Query Handling" }
+  }
+}

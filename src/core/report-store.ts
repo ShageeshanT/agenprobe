@@ -25,6 +25,7 @@ import {
   readFileSync,
   readdirSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { basename, extname, join } from "node:path";
@@ -334,6 +335,58 @@ function isRunRecord(value: unknown): value is RunRecord {
     typeof v.adapter === "string" &&
     Array.isArray(v.results)
   );
+}
+
+/**
+ * Prune old report files in a directory, keeping only the most recent N.
+ * Works on any directory of JSON files sorted lexicographically (which
+ * all our report/doctor ID schemes are). Returns the number of files
+ * deleted.
+ */
+export function pruneReportDir(
+  dir: string,
+  keepCount: number = 200,
+): number {
+  if (!existsSync(dir) || !statSync(dir).isDirectory()) return 0;
+  const files = readdirSync(dir)
+    .filter((f) => extname(f).toLowerCase() === ".json")
+    .sort();
+  if (files.length <= keepCount) return 0;
+  const toDelete = files.slice(0, files.length - keepCount);
+  let deleted = 0;
+  for (const file of toDelete) {
+    try {
+      unlinkSync(join(dir, file));
+      deleted += 1;
+    } catch {
+      /* ignore individual file errors */
+    }
+  }
+  return deleted;
+}
+
+/**
+ * Prune all report subdirectories under a root. Walks one level deep
+ * (adapter name) and prunes each subdirectory independently.
+ */
+export function pruneAllReports(
+  rootDir: string,
+  keepCount: number = 200,
+): number {
+  if (!existsSync(rootDir)) return 0;
+  let total = 0;
+  for (const entry of readdirSync(rootDir)) {
+    const subDir = join(rootDir, entry);
+    if (!statSync(subDir).isDirectory()) continue;
+    // Prune scenario reports in the adapter dir itself.
+    total += pruneReportDir(subDir, keepCount);
+    // Prune doctor reports in the adapter/doctor/ subdir.
+    const doctorDir = join(subDir, "doctor");
+    if (existsSync(doctorDir) && statSync(doctorDir).isDirectory()) {
+      total += pruneReportDir(doctorDir, keepCount);
+    }
+  }
+  return total;
 }
 
 // StepResult is referenced in the aggregate logic; re-exporting so
