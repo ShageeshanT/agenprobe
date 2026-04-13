@@ -556,6 +556,269 @@ rm -f /tmp/agentprobe-doctor-pair.js
   },
 };
 
+// -------- composio --------
+
+/**
+ * Check that the Composio plugin has a consumer key configured — either
+ * in openclaw.json plugins.entries.composio.config.consumerKey or in the
+ * COMPOSIO_CONSUMER_KEY env var. Without a key the plugin is enabled but
+ * dead; the MCP endpoint returns 401 and no tools are available.
+ *
+ * On success this check stores the discovered key + MCP URL in
+ * ctx.composio (a transient field) so subsequent Composio checks can
+ * reuse them without another SSH call.
+ */
+const checkComposioKeyConfigured: DoctorCheck = {
+  id: "composio_key_configured",
+  label: "Composio consumer key is set",
+  category: "composio",
+  applies: (ctx) => Boolean(ctx.coords),
+  async run(ctx) {
+    if (!ctx.coords) return { status: "skip", detail: "no coords" };
+    const script = `
+cat > /tmp/agentprobe-composio-key.js <<'COMPKEY_EOF'
+const fs = require("fs");
+const c = JSON.parse(fs.readFileSync("/data/.openclaw/openclaw.json", "utf8"));
+const entry = c.plugins && c.plugins.entries && c.plugins.entries.composio;
+const cfg = entry && entry.config;
+const keyFromConfig = (cfg && cfg.consumerKey) || null;
+const keyFromEnv = process.env.COMPOSIO_CONSUMER_KEY || null;
+const key = keyFromConfig || keyFromEnv;
+console.log("COMPOSIO_KEY=" + JSON.stringify({
+  enabled: Boolean(entry && entry.enabled),
+  hasKey: Boolean(key),
+  keyPrefix: key ? key.slice(0, 6) + "..." : null,
+  keyFull: key || null,
+  mcpUrl: (cfg && cfg.mcpUrl) || "https://connect.composio.dev/mcp"
+}));
+COMPKEY_EOF
+node /tmp/agentprobe-composio-key.js
+rm -f /tmp/agentprobe-composio-key.js
+`.trim();
+    const { stdout, code } = await runRemoteCommand(ctx.coords, script, 15_000);
+    if (code !== 0) {
+      return { status: "fail", detail: `remote exit ${code}` };
+    }
+    const m = stdout.match(/COMPOSIO_KEY=(\{.*\})/);
+    if (!m || !m[1]) {
+      return { status: "fail", detail: "no parseable output" };
+    }
+    const info = JSON.parse(m[1]) as {
+      enabled: boolean;
+      hasKey: boolean;
+      keyPrefix: string | null;
+      keyFull: string | null;
+      mcpUrl: string;
+    };
+
+    // Stash key + URL for the subsequent Composio checks so they don't
+    // need to SSH again.
+    if (info.keyFull) {
+      (ctx as ComposioAwareContext)._composioKey = info.keyFull;
+      (ctx as ComposioAwareContext)._composioMcpUrl = info.mcpUrl;
+    }
+
+    if (!info.enabled) {
+      return {
+        status: "skip",
+        detail: "composio plugin is not enabled",
+        data: info,
+      };
+    }
+    if (!info.hasKey) {
+      return {
+        status: "warn",
+        detail: "composio plugin is enabled but no consumer key is configured (config or COMPOSIO_CONSUMER_KEY env)",
+        data: info,
+      };
+    }
+    return {
+      status: "ok",
+      detail: `consumer key: ${info.keyPrefix} · MCP URL: ${info.mcpUrl}`,
+      data: { keyPrefix: info.keyPrefix, mcpUrl: info.mcpUrl },
+    };
+  },
+};
+
+/** Transient extension of DoctorContext for passing the key between checks. */
+interface ComposioAwareContext {
+  _composioKey?: string;
+  _composioMcpUrl?: string;
+}
+
+/**
+ * Verify the Composio MCP endpoint is reachable by POSTing an MCP
+ * `initialize` request. If the consumer key is wrong or expired the
+ * endpoint returns 401 — which is itself a useful finding.
+ *
+ * This runs from AgentProbe's own process, not from the container,
+ * because the endpoint is a public HTTPS URL. No SSH needed.
+ */
+const checkComposioMcpReachable: DoctorCheck = {
+  id: "composio_mcp_reachable",
+  label: "Composio MCP endpoint is reachable",
+  category: "composio",
+  applies: (ctx) => Boolean((ctx as ComposioAwareContext)._composioKey),
+  async run(ctx) {
+    const key = (ctx as ComposioAwareContext)._composioKey;
+    const mcpUrl = (ctx as ComposioAwareContext)._composioMcpUrl ?? "https://connect.composio.dev/mcp";
+    if (!key) return { status: "skip", detail: "no consumer key discovered" };
+
+    const initPayload = {
+      jsonrpc: "2.0",
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "agentprobe-doctor", version: "1.0" },
+      },
+      id: 1,
+    };
+
+    try {
+      const res = await fetch(mcpUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-consumer-api-key": key,
+        },
+        body: JSON.stringify(initPayload),
+        signal: AbortSignal.timeout(15000),
+      });
+
+      if (res.status === 401) {
+        return {
+          status: "fail",
+          detail: "MCP endpoint returned 401 — consumer key is invalid or expired",
+          data: { mcpUrl, httpStatus: res.status },
+        };
+      }
+      if (!res.ok) {
+        return {
+          status: "warn",
+          detail: `MCP endpoint returned HTTP ${res.status} ${res.statusText}`,
+          data: { mcpUrl, httpStatus: res.status },
+        };
+      }
+      let body: unknown;
+      try {
+        body = await res.json();
+      } catch {
+        body = await res.text();
+      }
+      return {
+        status: "ok",
+        detail: `MCP endpoint responded (HTTP ${res.status})`,
+        data: { mcpUrl, httpStatus: res.status, body },
+      };
+    } catch (err) {
+      return {
+        status: "fail",
+        detail: `MCP endpoint unreachable: ${(err as Error).message}`,
+        data: { mcpUrl },
+      };
+    }
+  },
+};
+
+/**
+ * Ask the MCP endpoint for the list of available tools — i.e., which
+ * Composio connectors are actually wired up. An empty list means the
+ * consumer key is valid but no apps have been connected on the Composio
+ * dashboard.
+ *
+ * The output is the most useful card in the Composio section of the
+ * dashboard: "12 tools available: GMAIL_SEND_EMAIL, GMAIL_LIST_EMAILS,
+ * GOOGLE_SHEETS_CREATE_ROW, ..."
+ */
+const checkComposioToolsList: DoctorCheck = {
+  id: "composio_tools_list",
+  label: "Composio connected tools",
+  category: "composio",
+  applies: (ctx) => Boolean((ctx as ComposioAwareContext)._composioKey),
+  async run(ctx) {
+    const key = (ctx as ComposioAwareContext)._composioKey;
+    const mcpUrl = (ctx as ComposioAwareContext)._composioMcpUrl ?? "https://connect.composio.dev/mcp";
+    if (!key) return { status: "skip", detail: "no consumer key discovered" };
+
+    // MCP tools/list request (JSON-RPC 2.0)
+    const listPayload = {
+      jsonrpc: "2.0",
+      method: "tools/list",
+      params: {},
+      id: 2,
+    };
+
+    try {
+      const res = await fetch(mcpUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-consumer-api-key": key,
+        },
+        body: JSON.stringify(listPayload),
+        signal: AbortSignal.timeout(20000),
+      });
+      if (!res.ok) {
+        return {
+          status: "warn",
+          detail: `MCP endpoint returned HTTP ${res.status} when listing tools`,
+          data: { httpStatus: res.status },
+        };
+      }
+      const body = (await res.json()) as {
+        result?: { tools?: { name: string }[] };
+        error?: { message?: string };
+      };
+      if (body.error) {
+        return {
+          status: "warn",
+          detail: `MCP tools/list returned error: ${body.error.message ?? JSON.stringify(body.error)}`,
+          data: { error: body.error },
+        };
+      }
+      const tools = body.result?.tools ?? [];
+      const toolNames = tools.map((t) => t.name);
+
+      // Group by app prefix (e.g. GMAIL_, GOOGLE_SHEETS_, SLACK_)
+      const apps = new Set<string>();
+      for (const name of toolNames) {
+        const parts = name.split("_");
+        // Heuristic: the "app" is everything before the last action word(s).
+        // GMAIL_SEND_EMAIL → GMAIL, GOOGLE_SHEETS_CREATE_ROW → GOOGLE_SHEETS
+        // For better grouping, take the first 1-2 segments as the app prefix
+        // unless the name is short.
+        if (parts.length >= 3) {
+          // Check if second part looks like a sub-service
+          const candidate = parts.slice(0, 2).join("_");
+          if (parts.length >= 4) apps.add(candidate);
+          else apps.add(parts[0] ?? name);
+        } else {
+          apps.add(parts[0] ?? name);
+        }
+      }
+
+      if (toolNames.length === 0) {
+        return {
+          status: "warn",
+          detail: "consumer key is valid but no Composio tools are connected — connect apps on the Composio dashboard",
+          data: { toolCount: 0, tools: toolNames, apps: [...apps] },
+        };
+      }
+      return {
+        status: "ok",
+        detail: `${toolNames.length} tool(s) from ${apps.size} app(s): ${[...apps].slice(0, 8).join(", ")}${apps.size > 8 ? " +" + (apps.size - 8) + " more" : ""}`,
+        data: { toolCount: toolNames.length, appCount: apps.size, apps: [...apps], tools: toolNames },
+      };
+    } catch (err) {
+      return {
+        status: "fail",
+        detail: `MCP tools/list call failed: ${(err as Error).message}`,
+      };
+    }
+  },
+};
+
 // -------- export --------
 
 /**
@@ -571,6 +834,9 @@ export function buildOpenClawDoctorChecks(): DoctorCheck[] {
     checkAgentDBSchema,
     checkPluginsEnabled,
     checkChannelsConfigured,
+    checkComposioKeyConfigured,
+    checkComposioMcpReachable,
+    checkComposioToolsList,
     checkCronJobs,
     checkRecentErrors,
     checkDiskSpace,
