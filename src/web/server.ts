@@ -15,6 +15,12 @@ import {
   type DoctorContext,
   type DoctorReportStore,
 } from "../core/doctor-runner.js";
+import {
+  createInstanceStore,
+  migrateFromEnv,
+  type BotInstance,
+  type InstanceStore,
+} from "../core/instances.js";
 import { createReportStore, type ReportStore } from "../core/report-store.js";
 import {
   loadScenariosForAdapter,
@@ -51,12 +57,15 @@ const DEFAULT_KEY_PATH = join(
   ".agentprobe-keys",
   "openclaw-ed25519.pem",
 );
+const DEFAULT_KEYS_DIR = join(PROJECT_ROOT, ".agentprobe-keys");
+const DEFAULT_INSTANCES_DIR = join(PROJECT_ROOT, "instances");
 
 export interface WebServerOptions {
   port?: number;
   scenarioDir?: string;
   reportsDir?: string;
   dotenvPath?: string;
+  instancesDir?: string;
 }
 
 type AdapterKind = "openclaw" | "hermes";
@@ -114,8 +123,48 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<void>
   const scenarioDir = opts.scenarioDir ?? DEFAULT_SCENARIO_DIR;
   const reportsDir = opts.reportsDir ?? DEFAULT_REPORTS_DIR;
   const dotenvPath = opts.dotenvPath ?? DEFAULT_DOTENV_PATH;
+  const instancesDir = opts.instancesDir ?? DEFAULT_INSTANCES_DIR;
   const reports: ReportStore = createReportStore(reportsDir);
   const doctorStore: DoctorReportStore = createDoctorReportStore(reportsDir);
+
+  // Instance management — load from instances/ or auto-migrate from .env.
+  const instanceStore = createInstanceStore(instancesDir);
+  if (migrateFromEnv(instanceStore)) {
+    console.log(
+      `[web] auto-migrated .env config into instances/ (${instanceStore.list().length} instance(s))`,
+    );
+  }
+
+  /**
+   * Activate an instance by writing its config into process.env so the
+   * existing adapter builders pick it up. This avoids refactoring every
+   * route — they still call buildOpenClawEntry() / buildHermesEntry()
+   * which read from process.env.
+   */
+  function activateInstance(inst: BotInstance): void {
+    if (inst.platform === "openclaw") {
+      if (inst.gatewayUrl) process.env.OPENCLAW_GATEWAY_URL = inst.gatewayUrl;
+      if (inst.gatewayToken) process.env.OPENCLAW_GATEWAY_TOKEN = inst.gatewayToken;
+      if (inst.agentId) process.env.OPENCLAW_AGENT_ID = inst.agentId;
+      if (inst.railwayProject) process.env.RAILWAY_PROJECT = inst.railwayProject;
+      if (inst.railwayEnvironment) process.env.RAILWAY_ENVIRONMENT = inst.railwayEnvironment;
+      if (inst.railwayService) process.env.RAILWAY_SERVICE = inst.railwayService;
+    } else if (inst.platform === "hermes") {
+      if (inst.railwayProject) process.env.HERMES_RAILWAY_PROJECT = inst.railwayProject;
+      if (inst.railwayEnvironment) process.env.HERMES_RAILWAY_ENVIRONMENT = inst.railwayEnvironment;
+      if (inst.railwayService) process.env.HERMES_RAILWAY_SERVICE = inst.railwayService;
+    }
+  }
+
+  // Track which instance is active per platform.
+  let activeInstanceName: Record<string, string> = {};
+  const allInstances = instanceStore.list();
+  for (const inst of allInstances) {
+    if (!activeInstanceName[inst.platform]) {
+      activeInstanceName[inst.platform] = inst.name;
+      activateInstance(inst);
+    }
+  }
 
   // Adapter entries are rebuildable at runtime because the setup wizard
   // can reconfigure an adapter without restarting the server. `entries`
@@ -215,6 +264,64 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<void>
         transport: e.transport,
       })),
     });
+  });
+
+  // ---- Instance management routes ----
+
+  app.get("/api/instances", (_req, res) => {
+    const all = instanceStore.list();
+    res.json({
+      instances: all.map((inst) => ({
+        name: inst.name,
+        platform: inst.platform,
+        createdAt: inst.createdAt,
+        active: activeInstanceName[inst.platform] === inst.name,
+        gatewayUrl: inst.gatewayUrl ?? null,
+        agentId: inst.agentId ?? null,
+      })),
+      activeByPlatform: { ...activeInstanceName },
+    });
+  });
+
+  app.post("/api/instances/activate/:name", async (req: Request, res: Response) => {
+    const nameRaw = req.params.name;
+    const name = typeof nameRaw === "string" ? nameRaw : "";
+    if (!name) {
+      res.status(400).json({ error: "missing instance name" });
+      return;
+    }
+    const inst = instanceStore.get(name);
+    if (!inst) {
+      res.status(404).json({ error: `no instance named "${name}"` });
+      return;
+    }
+    activateInstance(inst);
+    activeInstanceName[inst.platform] = inst.name;
+    try {
+      await reloadAdapter(inst.platform as AdapterKind);
+    } catch (err) {
+      // Non-fatal — adapter will show as disconnected in /api/status.
+    }
+    res.json({
+      success: true,
+      activated: inst.name,
+      platform: inst.platform,
+    });
+  });
+
+  app.delete("/api/instances/:name", (req: Request, res: Response) => {
+    const nameRaw = req.params.name;
+    const name = typeof nameRaw === "string" ? nameRaw : "";
+    if (!name) {
+      res.status(400).json({ error: "missing instance name" });
+      return;
+    }
+    const removed = instanceStore.remove(name);
+    if (!removed) {
+      res.status(404).json({ error: `no instance named "${name}"` });
+      return;
+    }
+    res.json({ success: true, removed: name });
   });
 
   app.get("/api/status", async (req, res) => {
@@ -445,9 +552,10 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<void>
   });
 
   app.post("/api/setup/connect", async (req: Request, res: Response) => {
-    // Payload: { platform: "openclaw" | "hermes", sshCommand: string }
+    // Payload: { platform: "openclaw" | "hermes", sshCommand: string, name?: string }
     const platformRaw = req.body?.platform;
     const sshCommandRaw = req.body?.sshCommand;
+    const instanceNameRaw = req.body?.name;
     if (platformRaw !== "openclaw" && platformRaw !== "hermes") {
       res.status(400).json({ error: "platform must be 'openclaw' or 'hermes'" });
       return;
@@ -458,6 +566,11 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<void>
     }
     const platform = platformRaw as AdapterKind;
     const sshCommand = sshCommandRaw;
+    const { sanitizeInstanceName } = await import("../core/instances.js");
+    const instanceName =
+      typeof instanceNameRaw === "string" && instanceNameRaw.trim()
+        ? sanitizeInstanceName(instanceNameRaw)
+        : sanitizeInstanceName(`${platform}-${Date.now().toString(36)}`);
 
     const steps: SetupStep[] = [];
     const envUpdates: Record<string, string> = {};
@@ -523,8 +636,26 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<void>
         return;
       }
 
-      // 5. Write env updates
-      const writeStep = await runStep("env", "Write credentials to .env", () => {
+      // 5. Save as instance + activate
+      const writeStep = await runStep("save", "Save bot profile and activate", () => {
+        const inst: BotInstance = {
+          name: instanceName,
+          platform: "openclaw",
+          createdAt: new Date().toISOString(),
+          gatewayUrl: discovered.value!.gatewayUrl,
+          gatewayToken: discovered.value!.gatewayToken,
+          agentId: discovered.value!.agentId,
+          railwayProject: coords.project,
+          railwayEnvironment: coords.environment,
+          railwayService: coords.service,
+          pairingKeyFilename: "openclaw-ed25519.pem",
+        };
+        instanceStore.save(inst);
+        activateInstance(inst);
+        activeInstanceName[inst.platform] = inst.name;
+
+        // Also write to .env for CLI compatibility (the CLI scripts
+        // still read from .env, not instances/).
         envUpdates.OPENCLAW_GATEWAY_URL = discovered.value!.gatewayUrl;
         envUpdates.OPENCLAW_GATEWAY_TOKEN = discovered.value!.gatewayToken;
         envUpdates.OPENCLAW_AGENT_ID = discovered.value!.agentId;
@@ -532,10 +663,6 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<void>
         envUpdates.RAILWAY_ENVIRONMENT = coords.environment;
         envUpdates.RAILWAY_SERVICE = coords.service;
         updateDotEnv(dotenvPath, envUpdates);
-        // Apply in-memory so the rebuilt adapter entry sees the new values
-        for (const [k, v] of Object.entries(envUpdates)) {
-          process.env[k] = v;
-        }
       });
       steps.push(writeStep.step);
       if (writeStep.step.status !== "ok") {
@@ -591,14 +718,23 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<void>
     } else {
       // Hermes path — no discovery needed, no pairing. Just save coords
       // and run a probe query through the shell-out transport.
-      const writeStep = await runStep("env", "Write Railway coords to .env", () => {
+      const writeStep = await runStep("save", "Save bot profile and activate", () => {
+        const inst: BotInstance = {
+          name: instanceName,
+          platform: "hermes",
+          createdAt: new Date().toISOString(),
+          railwayProject: coords.project,
+          railwayEnvironment: coords.environment,
+          railwayService: coords.service,
+        };
+        instanceStore.save(inst);
+        activateInstance(inst);
+        activeInstanceName[inst.platform] = inst.name;
+
         envUpdates.HERMES_RAILWAY_PROJECT = coords.project;
         envUpdates.HERMES_RAILWAY_ENVIRONMENT = coords.environment;
         envUpdates.HERMES_RAILWAY_SERVICE = coords.service;
         updateDotEnv(dotenvPath, envUpdates);
-        for (const [k, v] of Object.entries(envUpdates)) {
-          process.env[k] = v;
-        }
       });
       steps.push(writeStep.step);
       if (writeStep.step.status !== "ok") {

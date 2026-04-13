@@ -8,3 +8,4 @@ dist/
 *.sqlite-journal
 /reports/
 /.agentprobe-keys/
+/instances/

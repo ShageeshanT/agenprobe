@@ -494,6 +494,11 @@
           </div>
         </div>
 
+        <div class="card" id="instancesCard" style="margin-bottom: 16px; display: none">
+          <div class="card-head">Configured bots</div>
+          <div id="instancesList"></div>
+        </div>
+
         <div class="setup-grid">
           <div class="card">
             <div class="card-head">Bot</div>
@@ -540,6 +545,11 @@
             <button class="btn btn-ghost" id="setupPlatformOpenclaw" onclick="setSetupPlatform('openclaw')" style="flex: 1">OpenClaw</button>
             <button class="btn btn-ghost" id="setupPlatformHermes" onclick="setSetupPlatform('hermes')" style="flex: 1">Hermes</button>
           </div>
+          <input
+            id="setupInstanceName"
+            placeholder="Bot name (e.g. client-x-staging)"
+            style="width: 100%; font-size: 13px; background: var(--g50); border: 1px solid var(--g200); border-radius: 8px; padding: 10px 12px; color: var(--g900); outline: none; margin-bottom: 10px; box-sizing: border-box;"
+          />
           <textarea
             id="setupSshCommand"
             rows="3"
@@ -1312,6 +1322,72 @@
         $("#sF").textContent = f;
       }
 
+      // ---------- instances ----------
+      async function loadInstances() {
+        try {
+          const res = await fetch("/api/instances");
+          const data = await res.json();
+          const list = data.instances || [];
+          const card = $("#instancesCard");
+          const container = $("#instancesList");
+          if (list.length <= 1) {
+            card.style.display = "none";
+            return;
+          }
+          card.style.display = "";
+          container.innerHTML = "";
+          for (const inst of list) {
+            const row = document.createElement("div");
+            row.className = "sc-row";
+            row.style.cursor = inst.active ? "default" : "pointer";
+            if (!inst.active) {
+              row.onclick = () => activateInstanceByName(inst.name);
+            }
+            const dot = document.createElement("div");
+            dot.className = "sc-dot " + (inst.active ? "d-pass" : "d-pend");
+            row.appendChild(dot);
+
+            const main = document.createElement("div");
+            main.className = "sc-main";
+            main.innerHTML =
+              '<div class="sc-nm">' + escapeHtml(inst.name) + "</div>" +
+              '<div class="sc-desc">' + escapeHtml(inst.platform) +
+              (inst.gatewayUrl ? " · " + escapeHtml(inst.gatewayUrl) : "") +
+              (inst.active ? ' · <span style="font-weight:600">active</span>' : "") +
+              "</div>";
+            row.appendChild(main);
+
+            const badge = document.createElement("span");
+            badge.className = "sc-type";
+            badge.textContent = inst.active ? "ACTIVE" : "click to activate";
+            row.appendChild(badge);
+
+            container.appendChild(row);
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+
+      async function activateInstanceByName(name) {
+        try {
+          const res = await fetch("/api/instances/activate/" + encodeURIComponent(name), { method: "POST" });
+          const data = await res.json();
+          if (data.success) {
+            currentAdapter = data.platform;
+            localStorage.setItem(ADAPTER_STORAGE_KEY, currentAdapter);
+            await loadAdapters();
+            await loadInstances();
+            await loadStatus();
+            await loadScenarios();
+            await loadHistory();
+            await loadDoctorHistory();
+          }
+        } catch (err) {
+          alert("Failed to activate: " + err.message);
+        }
+      }
+
       // ---------- doctor (Doctor tab) ----------
       let doctorRunInFlight = false;
 
@@ -1642,6 +1718,7 @@
       async function runSetupConnect() {
         if (setupInFlight) return;
         const sshCommand = $("#setupSshCommand").value.trim();
+        const instanceName = $("#setupInstanceName").value.trim();
         if (!sshCommand) {
           renderSetupLog([
             { id: "validate", label: "Validate input", status: "fail", detail: "SSH command is empty.", durationMs: 0 },
@@ -1656,10 +1733,12 @@
         ]);
 
         try {
+          const payload = { platform: setupPlatform, sshCommand };
+          if (instanceName) payload.name = instanceName;
           const res = await fetch("/api/setup/connect", {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ platform: setupPlatform, sshCommand }),
+            body: JSON.stringify(payload),
           });
           const data = await res.json();
           renderSetupLog(data.steps || [], data);
@@ -1670,9 +1749,11 @@
             currentAdapter = setupPlatform;
             localStorage.setItem(ADAPTER_STORAGE_KEY, currentAdapter);
             await loadAdapters();
+            await loadInstances();
             await loadStatus();
             await loadScenarios();
             await loadHistory();
+            await loadDoctorHistory();
           }
         } catch (err) {
           renderSetupLog([
@@ -1770,6 +1851,7 @@
       initSessions();
       setSetupPlatform("openclaw");
       loadAdapters().then(() => {
+        loadInstances();
         loadStatus();
         loadScenarios();
         loadHistory();
