@@ -1,0 +1,54 @@
+name: quotation-flow
+description: |
+  Template: the core B2B flow — customer asks for a quote, bot gathers
+  requirements, confirms it will get back with a quotation, and
+  (optionally) the internal team is notified.
+
+defaultTimeoutMs: 90000
+session: shared
+
+steps:
+  - name: Customer requests a quote
+    send: "I need a quotation for your services. We're a team of 15 people."
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      # Bot should acknowledge and gather more info.
+      - type: response_matches
+        pattern: '\?'
+        severity: warning
+        description: "Bot should ask a clarifying question before quoting."
+
+  - name: Customer provides more details
+    send: "We need help with customer support automation and lead management. Budget is around $5000/month."
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      # Bot should confirm understanding and mention next steps.
+      - type: response_matches
+        pattern: '(understand|got it|noted|team|forward|quotation|quote|proposal|get back)'
+        flags: "i"
+        severity: warning
+        description: "Bot should confirm it captured the requirement."
+
+  - name: Customer asks for timeline
+    send: "When can I expect the quotation?"
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      # Bot should give a timeframe or say it will follow up.
+      - type: response_matches
+        pattern: '(hour|day|business day|soon|shortly|get back|follow up|within)'
+        flags: "i"
+        severity: warning
+        description: "Bot should mention a timeframe for the quotation."
+
+  - name: Recall — bot remembers the team size
+    send: "How many people did I say are on my team?"
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      - type: response_contains
+        value: "15"
+        severity: critical
+        description: "Bot must remember the team size from the first message."

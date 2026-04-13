@@ -1,0 +1,33 @@
+name: business-hours
+description: |
+  Template: verify the bot handles time-related questions correctly.
+  Tests whether the bot knows its business hours, can schedule within
+  them, and has a reasonable response to after-hours inquiries.
+  Adapt the expected hours/days to your client's actual schedule.
+
+defaultTimeoutMs: 60000
+session: per-step
+
+steps:
+  - name: Ask about business hours
+    send: "What are your business hours?"
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      # Bot should mention specific times or days. Adapt the pattern.
+      - type: response_matches
+        pattern: '(\d+\s*(am|pm|AM|PM)|monday|tuesday|wednesday|thursday|friday|weekday|weekend|24.?7)'
+        flags: "i"
+        severity: warning
+        description: "Bot should mention specific times or days when asked about hours."
+
+  - name: Ask to schedule something
+    send: "Can I book a call for tomorrow at 10am?"
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      - type: response_matches
+        pattern: '(schedule|book|appointment|calendar|slot|available|10)'
+        flags: "i"
+        severity: warning
+        description: "Bot should acknowledge the scheduling request."

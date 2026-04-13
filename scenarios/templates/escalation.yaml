@@ -1,0 +1,48 @@
+name: escalation
+description: |
+  Template: verify the bot escalates when it should — angry customer,
+  repeated failures, or explicit escalation request — and does NOT
+  escalate on routine interactions.
+
+defaultTimeoutMs: 60000
+session: per-step
+
+steps:
+  - name: Routine message — no escalation needed
+    send: "What services do you offer?"
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      - type: response_not_contains
+        value: "manager"
+        caseInsensitive: true
+        severity: warning
+        description: "A simple service question shouldn't trigger escalation."
+      - type: response_not_contains
+        value: "escalat"
+        caseInsensitive: true
+        severity: warning
+
+  - name: Frustrated customer — bot should de-escalate or escalate
+    send: "This is the THIRD TIME I've asked about this and nobody is helping me. I want to speak to a manager NOW."
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      # Bot should either empathize + offer to escalate, or confirm
+      # it's passing the message to a human. Adapt to your bot's rules.
+      - type: response_matches
+        pattern: '(manager|supervisor|team|escalat|human|someone|understand|sorry|apolog)'
+        flags: "i"
+        severity: critical
+        description: "An angry customer demanding a manager should see escalation language."
+
+  - name: Explicit escalation request
+    send: "Please transfer me to a human agent."
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      - type: response_matches
+        pattern: '(transfer|connect|forward|human|agent|team|right away)'
+        flags: "i"
+        severity: critical
+        description: "An explicit transfer request must be acknowledged."

@@ -1,0 +1,59 @@
+name: message-routing
+description: |
+  Template: verify the bot correctly identifies message intent and
+  routes to the appropriate internal team. Each step simulates a
+  different type of request and checks the bot mentions the right
+  department / action.
+
+defaultTimeoutMs: 60000
+session: per-step
+
+steps:
+  - name: Sales inquiry routes to sales
+    send: "I want to buy your premium plan. Who do I talk to?"
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      - type: response_matches
+        pattern: '(sales|team|forward|connect|reach out|pricing)'
+        flags: "i"
+        severity: critical
+        description: "A purchase request should route to / mention sales."
+      - type: response_not_contains
+        value: "support"
+        caseInsensitive: true
+        severity: warning
+        description: "Sales inquiry shouldn't be confused with a support request."
+
+  - name: Support request routes to support
+    send: "I'm having a problem with my account. It won't let me log in."
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      - type: response_matches
+        pattern: '(support|help|assist|look into|resolve|ticket)'
+        flags: "i"
+        severity: critical
+        description: "A support request should route to / mention support."
+
+  - name: Billing question routes to billing
+    send: "I was charged twice on my last invoice. Can someone fix this?"
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      - type: response_matches
+        pattern: '(billing|invoice|charge|payment|finance|refund)'
+        flags: "i"
+        severity: critical
+        description: "A billing complaint should route to / mention billing."
+
+  - name: General inquiry handled directly
+    send: "What time do you open tomorrow?"
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      - type: response_not_contains
+        value: "forward"
+        caseInsensitive: true
+        severity: warning
+        description: "Simple questions should be answered directly, not forwarded."

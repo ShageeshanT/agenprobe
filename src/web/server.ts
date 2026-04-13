@@ -969,6 +969,23 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<void>
     }
   });
 
+  // ---- Templates API ----
+
+  const templatesDir = join(scenarioDir, "templates");
+
+  app.get("/api/templates", (_req, res) => {
+    try {
+      const scenarios = existsSync(templatesDir)
+        ? loadScenariosForAdapter(templatesDir, "__none__")
+        : [];
+      res.json({
+        templates: scenarios.map((s) => summarizeScenario(s)),
+      });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   // ---- Schedule config API ----
 
   app.post("/api/instances/:name/schedule", async (req: Request, res: Response) => {

@@ -1,0 +1,65 @@
+name: lead-followup
+description: |
+  Template: a new lead messages the bot, the bot qualifies them,
+  asks for their needs, and confirms it will forward to the team.
+  Adapt the send messages and assertions to match your bot's actual
+  persona and business rules.
+
+defaultTimeoutMs: 60000
+session: shared
+
+steps:
+  - name: New lead initial contact
+    send: "Hi, I saw your service online. I'm looking for some help."
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      - type: response_not_contains
+        value: "error"
+        caseInsensitive: true
+        severity: critical
+      # The bot should acknowledge and ask a qualifying question.
+      # Adapt the contains check to your bot's actual phrasing.
+      - type: response_matches
+        pattern: '\?'
+        severity: warning
+        description: "Bot should ask a follow-up question (contains a '?')."
+
+  - name: Lead provides their need
+    send: "I need help with setting up my business operations. Can you help?"
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      # Bot should confirm it can help or explain options.
+      - type: response_not_contains
+        value: "I don't know"
+        caseInsensitive: true
+        severity: warning
+      - type: response_not_contains
+        value: "I can't help"
+        caseInsensitive: true
+        severity: warning
+
+  - name: Lead asks about pricing / next steps
+    send: "What's the process? How much does it cost?"
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      # Bot should either give pricing info or say it will check
+      # with the team. Adapt to your bot's actual flow.
+      - type: response_matches
+        pattern: '(price|cost|quote|team|forward|get back|reach out|schedule)'
+        flags: "i"
+        severity: warning
+        description: "Bot should mention pricing, team handoff, or next steps."
+
+  - name: Session recall — bot remembers the lead's need
+    send: "Can you remind me what I asked about?"
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      - type: response_contains
+        value: "business"
+        caseInsensitive: true
+        severity: warning
+        description: "Bot should recall the lead mentioned 'business operations'."
