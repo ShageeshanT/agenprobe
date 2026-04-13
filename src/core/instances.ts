@@ -52,6 +52,24 @@ export interface BotInstance {
    * have independent pairing state.
    */
   pairingKeyFilename?: string;
+
+  // ---- Scheduling ----
+  /**
+   * How often to run the doctor automatically. Simple duration string:
+   * "15m", "1h", "6h", "1d". Omit or set to "" to disable.
+   */
+  doctorInterval?: string;
+  /**
+   * How often to run the full scenario suite. Same format as doctorInterval.
+   */
+  scenarioInterval?: string;
+  /**
+   * Webhook URL to POST to when a scheduled doctor or scenario run has
+   * failures. The POST body is a JSON summary with { instance, runType,
+   * passed, summary, timestamp }. Works with Slack incoming webhooks,
+   * Discord webhooks (wrap in { content: "..." }), or any generic endpoint.
+   */
+  webhookUrl?: string;
 }
 
 /**

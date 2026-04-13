@@ -21,6 +21,7 @@ import {
   type BotInstance,
   type InstanceStore,
 } from "../core/instances.js";
+import { Scheduler } from "../core/scheduler.js";
 import { createReportStore, type ReportStore } from "../core/report-store.js";
 import {
   loadScenariosForAdapter,
@@ -930,14 +931,163 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<void>
     }
   });
 
+  // ---- Schedule config API ----
+
+  app.post("/api/instances/:name/schedule", async (req: Request, res: Response) => {
+    const nameRaw = req.params.name;
+    const name = typeof nameRaw === "string" ? nameRaw : "";
+    if (!name) {
+      res.status(400).json({ error: "missing instance name" });
+      return;
+    }
+    const inst = instanceStore.get(name);
+    if (!inst) {
+      res.status(404).json({ error: `no instance named "${name}"` });
+      return;
+    }
+    // Accept partial updates — only overwrite fields that are present.
+    if (typeof req.body?.doctorInterval === "string") {
+      inst.doctorInterval = req.body.doctorInterval || undefined;
+    }
+    if (typeof req.body?.scenarioInterval === "string") {
+      inst.scenarioInterval = req.body.scenarioInterval || undefined;
+    }
+    if (typeof req.body?.webhookUrl === "string") {
+      inst.webhookUrl = req.body.webhookUrl || undefined;
+    }
+    instanceStore.save(inst);
+    scheduler.reschedule({
+      instanceName: inst.name,
+      ...(inst.doctorInterval ? { doctorInterval: inst.doctorInterval } : {}),
+      ...(inst.scenarioInterval ? { scenarioInterval: inst.scenarioInterval } : {}),
+      ...(inst.webhookUrl ? { webhookUrl: inst.webhookUrl } : {}),
+    });
+    res.json({ success: true, instance: inst.name, schedule: {
+      doctorInterval: inst.doctorInterval ?? null,
+      scenarioInterval: inst.scenarioInterval ?? null,
+      webhookUrl: inst.webhookUrl ? "(set)" : null,
+    } });
+  });
+
+  app.get("/api/scheduler/status", (_req, res) => {
+    res.json({ scheduled: scheduler.status() });
+  });
+
+  // ---- Scheduler ----
+
+  const scheduler = new Scheduler({
+    async runDoctor(instanceName) {
+      const inst = instanceStore.get(instanceName);
+      if (!inst || inst.platform !== "openclaw") {
+        return { passed: true, summary: "skipped (not openclaw)", durationMs: 0 };
+      }
+      // Activate instance and rebuild adapter to ensure we're
+      // pointed at the right bot.
+      activateInstance(inst);
+      const coords = readOpenClawCoords();
+      const gwUrl = process.env.OPENCLAW_GATEWAY_URL;
+      if (!coords || !gwUrl) {
+        return { passed: false, summary: "no Railway coords or gateway URL", durationMs: 0 };
+      }
+      const ctx: DoctorContext = {
+        adapter: "openclaw",
+        coords,
+        gatewayUrl: gwUrl,
+        agentId: process.env.OPENCLAW_AGENT_ID ?? "main",
+      };
+      const token = process.env.OPENCLAW_GATEWAY_TOKEN;
+      if (token) ctx.gatewayToken = token;
+      const checks = buildOpenClawDoctorChecks();
+      const report = await runDoctor(ctx, checks);
+      try { doctorStore.saveReport(report); } catch { /* swallow */ }
+      const s = report.summary;
+      return {
+        passed: report.passed,
+        summary: `${s.ok} ok, ${s.warn} warn, ${s.fail} fail, ${s.skip} skip`,
+        durationMs: report.durationMs,
+      };
+    },
+
+    async runScenarios(instanceName) {
+      const inst = instanceStore.get(instanceName);
+      if (!inst) {
+        return { passed: false, summary: "instance not found", durationMs: 0 };
+      }
+      activateInstance(inst);
+      const kind = inst.platform as AdapterKind;
+      const rt = runtime.get(kind);
+      if (!rt || !rt.entry.configured) {
+        return { passed: false, summary: `${kind} adapter not configured`, durationMs: 0 };
+      }
+      try {
+        const adapter = await getOrConnect(rt);
+        const handlers = buildPlatformHandlers(kind);
+        const scenarios = loadScenariosForAdapter(scenarioDir, kind);
+        const startedAt = Date.now();
+        const results = [];
+        for (const scenario of scenarios) {
+          results.push(await runScenario(adapter, scenario, { platformHandlers: handlers }));
+        }
+        const durationMs = Date.now() - startedAt;
+        const passed = results.filter((r) => r.passed).length;
+        const failed = results.length - passed;
+        try {
+          reports.saveRun({
+            adapter: kind,
+            trigger: "cli",
+            scope: "suite",
+            label: `scheduled-${instanceName}`,
+            startedAt,
+            durationMs,
+            results,
+          });
+        } catch { /* swallow */ }
+        return {
+          passed: failed === 0,
+          summary: `${passed}/${results.length} passed${failed > 0 ? ` (${failed} failed)` : ""}`,
+          durationMs,
+        };
+      } catch (err) {
+        return {
+          passed: false,
+          summary: `adapter error: ${(err as Error).message}`,
+          durationMs: 0,
+        };
+      }
+    },
+
+    onRunComplete(result) {
+      console.log(
+        `[scheduler] run complete: ${result.instance}/${result.runKind} → ${result.passed ? "PASS" : "FAIL"} (${result.durationMs}ms)`,
+      );
+    },
+  });
+
+  // Start schedules for all instances that have intervals configured.
+  for (const inst of instanceStore.list()) {
+    if (inst.doctorInterval || inst.scenarioInterval) {
+      scheduler.reschedule({
+        instanceName: inst.name,
+        ...(inst.doctorInterval ? { doctorInterval: inst.doctorInterval } : {}),
+        ...(inst.scenarioInterval ? { scenarioInterval: inst.scenarioInterval } : {}),
+        ...(inst.webhookUrl ? { webhookUrl: inst.webhookUrl } : {}),
+      });
+    }
+  }
+
   app.listen(port, () => {
     console.log(`[web] AgentProbe dashboard running at http://localhost:${port}`);
     console.log(`[web] scenarios: ${scenarioDir}`);
+    const scheduled = scheduler.status();
+    if (scheduled.length > 0) {
+      console.log(`[web] scheduler: ${scheduled.length} instance(s) with active schedules`);
+    }
   });
 
   // Graceful shutdown so connections don't leak on Ctrl+C.
   const shutdown = async () => {
     console.log("\n[web] shutting down");
+    scheduler.shutdown();
     for (const rt of runtime.values()) {
       if (rt.instance) {
         try {
