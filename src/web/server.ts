@@ -22,7 +22,11 @@ import {
   type InstanceStore,
 } from "../core/instances.js";
 import { Scheduler } from "../core/scheduler.js";
-import { createReportStore, type ReportStore } from "../core/report-store.js";
+import {
+  createReportStore,
+  pruneAllReports,
+  type ReportStore,
+} from "../core/report-store.js";
 import {
   loadScenariosForAdapter,
   ScenarioLoadError,
@@ -249,9 +253,43 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<void>
     }
   }
 
+  // Prune old reports on boot so history doesn't grow unbounded.
+  // Keeps the most recent 200 files per directory.
+  try {
+    const pruned = pruneAllReports(reportsDir, 200);
+    if (pruned > 0) {
+      console.log(`[web] pruned ${pruned} old report file(s) from ${reportsDir}`);
+    }
+  } catch {
+    /* non-fatal */
+  }
+
+  const serverStartedAt = Date.now();
+
   const app = express();
   app.use(express.json({ limit: "1mb" }));
   app.use(express.static(PUBLIC_DIR));
+
+  // Self-monitoring endpoint — shows server uptime, adapter states,
+  // scheduler status, and report counts. Useful for external health
+  // checks (e.g. a load balancer or monitoring system).
+  app.get("/healthz", (_req, res) => {
+    const adapters: Record<string, { connected: boolean; error?: string }> = {};
+    for (const [kind, rt] of runtime) {
+      adapters[kind] = {
+        connected: rt.connected,
+        ...(rt.connectError ? { error: rt.connectError } : {}),
+      };
+    }
+    res.json({
+      ok: true,
+      uptimeMs: Date.now() - serverStartedAt,
+      uptimeHuman: formatUptime(Date.now() - serverStartedAt),
+      adapters,
+      instances: instanceStore.list().length,
+      scheduled: scheduler.status().length,
+    });
+  });
 
   app.get("/api/adapters", (_req, res) => {
     res.json({
@@ -1225,6 +1263,15 @@ function resolveAdapterKind(req: Request): AdapterKind {
     "openclaw";
   if (raw === "openclaw" || raw === "hermes") return raw;
   return "openclaw";
+}
+
+function formatUptime(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s % 60}s`;
+  return `${s}s`;
 }
 
 function readOpenClawCoords(): RailwayCoordinates | undefined {

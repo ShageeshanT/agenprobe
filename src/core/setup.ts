@@ -136,19 +136,64 @@ export function parseRailwaySshCommand(raw: string): RailwayCoordinates {
  * command is base64-encoded so arbitrary content (including quotes, pipes,
  * $variables) survives the Windows cmd.exe → railway ssh → remote bash
  * chain without any quoting nightmares.
+ *
+ * Retries up to `maxRetries` times (default 2) with exponential backoff
+ * on transient failures: spawn errors (ENOENT when railway CLI is
+ * temporarily unreachable), SSH connection resets, and timeouts. Non-zero
+ * exit codes from the remote script are NOT retried — those usually mean
+ * the script itself failed, and retrying won't help.
  */
 export async function runRemoteCommand(
   coords: RailwayCoordinates,
   remoteBashScript: string,
   timeoutMs: number = 45_000,
+  opts: { maxRetries?: number } = {},
+): Promise<{ stdout: string; stderr: string; code: number }> {
+  const maxRetries = opts.maxRetries ?? 2;
+  let lastError: Error | undefined;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (attempt > 0) {
+      const backoff = Math.min(2000 * 2 ** (attempt - 1), 10_000);
+      console.log(
+        `[remote] retry ${attempt}/${maxRetries} after ${backoff}ms backoff`,
+      );
+      await new Promise((r) => setTimeout(r, backoff));
+    }
+
+    try {
+      const result = await runRemoteCommandOnce(
+        coords,
+        remoteBashScript,
+        timeoutMs,
+      );
+      return result;
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      const msg = lastError.message;
+      // Only retry on transport-level failures, not on remote script errors.
+      const isTransient =
+        msg.includes("timed out") ||
+        msg.includes("ECONNRESET") ||
+        msg.includes("ECONNREFUSED") ||
+        msg.includes("ENOENT") ||
+        msg.includes("fetch failed") ||
+        msg.includes("spawn") ||
+        msg.includes("EPIPE");
+      if (!isTransient) throw lastError;
+    }
+  }
+  throw lastError ?? new Error("runRemoteCommand exhausted retries");
+}
+
+async function runRemoteCommandOnce(
+  coords: RailwayCoordinates,
+  remoteBashScript: string,
+  timeoutMs: number,
 ): Promise<{ stdout: string; stderr: string; code: number }> {
   const b64 = Buffer.from(remoteBashScript, "utf8").toString("base64");
   const wrapped = `echo ${b64} | base64 -d | bash`;
 
-  // Build the full command line as a single string and let Node's spawn
-  // with shell:true send it through cmd.exe / sh -c verbatim. Quoting the
-  // `wrapped` section in double quotes prevents cmd.exe from interpreting
-  // the internal `|` characters locally.
   const cmdLine =
     `railway ssh` +
     ` --project=${coords.project}` +
