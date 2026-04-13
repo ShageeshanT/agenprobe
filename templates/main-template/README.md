@@ -21,6 +21,39 @@ main-template/
 +-- USER.md              # Owner's guide: what the bot does, common commands,
 |                         # setup instructions.
 +-- openclaw.json        # Golden config template with all required settings.
+|
++-- plugins/
+|   +-- agentdb/         # AgentDB plugin v3 — contacts, relay tracking, safety
+|       +-- openclaw.plugin.json    # Plugin manifest
+|       +-- package.json            # Dependencies (better-sqlite3)
+|       +-- src/
+|       |   +-- database.ts         # SQLite schema + all DB operations
+|       |   +-- index.ts            # OpenClaw plugin API integration
+|       +-- skills/
+|           +-- agentdb/
+|               +-- SKILL.md        # Behavioral rules the bot follows
+|                                     (contact_lookup before send, relay
+|                                     tracking, access level enforcement,
+|                                     unknown sender blocking)
+|
++-- skills/
+|   +-- self-improving/  # Self-improving skill v1.2.16 — learning + memory
+|       +-- SKILL.md                # Main skill definition
+|       +-- _meta.json              # ClawHub metadata
+|       +-- setup.md                # Installation guide
+|       +-- memory.md               # Hot storage template
+|       +-- memory-template.md      # Template for new memory files
+|       +-- learning.md             # Learning signal mechanics
+|       +-- corrections.md          # Correction log format
+|       +-- reflections.md          # Self-reflection format
+|       +-- boundaries.md           # Security boundaries
+|       +-- scaling.md              # Scaling rules
+|       +-- operations.md           # Memory operations
+|       +-- heartbeat-rules.md      # Heartbeat integration
+|       +-- heartbeat-state.md      # State tracking template
+|       +-- HEARTBEAT.md            # Workspace heartbeat snippet
+|       +-- openclaw-heartbeat.md   # OpenClaw-specific heartbeat seed
+|
 +-- workspace/
     +-- .learnings/
     |   +-- LEARNINGS.md
@@ -56,14 +89,23 @@ Replace these in every file before deploying:
 
 ## Setup Steps
 
-1. Copy this entire directory to the bot's workspace.
+1. Copy this entire directory to the bot's server.
 2. Replace all `{{PLACEHOLDERS}}` with the client's actual values.
-3. Install the AgentDB plugin to the plugins path.
-4. Install the self-improving skill.
-5. Add the owner as the first admin contact in AgentDB.
-6. Add the forwarder list contacts.
-7. Configure the WhatsApp allowlist in openclaw.json.
-8. Run AgentProbe's doctor + scenarios to verify everything is correct.
+3. Copy `plugins/agentdb/` to the bot's plugin path (e.g. `/root/.openclaw/plugins/agentdb/`).
+4. Run `cd /path/to/plugins/agentdb && npm install` to install better-sqlite3.
+5. Copy `skills/self-improving/` to the bot's skills directory or `~/self-improving/`.
+6. Copy `workspace/` contents to the bot's workspace directory.
+7. Copy the MD files (SOUL.md, MEMORY.md, etc.) to the bot's workspace root.
+8. Copy `openclaw.json` to the bot's config path (after replacing placeholders).
+9. Start the bot and message it as the owner to complete first-time setup.
+10. Add the owner as the first admin contact in AgentDB.
+11. Add the forwarder list contacts.
+12. Configure the WhatsApp allowlist in openclaw.json with allowed numbers.
+13. Run AgentProbe to verify everything is correct:
+    ```
+    npm run doctor     # Verifies config, schema, channels, plugins, skills
+    npm run scenarios  # Verifies behavior: greetings, routing, safety, recall
+    ```
 
 ## What AgentProbe Checks
 
