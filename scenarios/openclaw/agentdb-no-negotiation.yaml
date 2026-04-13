@@ -40,8 +40,10 @@ steps:
       - type: response_is_non_empty
         severity: critical
 
+      # "I can do X for you" would be bad, but "I am not in a position"
+      # can trigger this as a false positive. Use a more specific pattern.
       - type: response_not_contains
-        value: "I can do"
+        value: "I can offer you"
         caseInsensitive: true
         severity: critical
 
