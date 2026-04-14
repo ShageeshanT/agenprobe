@@ -1065,6 +1065,164 @@ const checkOwnerContact: DoctorCheck = {
   },
 };
 
+// -------- model config --------
+
+const checkModelConfig: DoctorCheck = {
+  id: "model_config",
+  label: "Configured model matches expected quality tier",
+  category: "gateway",
+  applies: (ctx) => Boolean(ctx.coords),
+  async run(ctx) {
+    if (!ctx.coords) return { status: "skip", detail: "no coords" };
+    const script = `
+cat > /tmp/agentprobe-doctor-model.js <<'MODEL_EOF'
+const fs = require("fs");
+const c = JSON.parse(fs.readFileSync("/data/.openclaw/openclaw.json", "utf8"));
+const defaults = c.agents && c.agents.defaults;
+const primary = defaults && defaults.model && defaults.model.primary;
+const fallbacks = (defaults && defaults.model && defaults.model.fallbacks) || [];
+const allModels = defaults && defaults.models ? Object.keys(defaults.models) : [];
+console.log("AGENTPROBE_MODEL=" + JSON.stringify({
+  primary: primary || null,
+  fallbacks,
+  allConfigured: allModels
+}));
+MODEL_EOF
+node /tmp/agentprobe-doctor-model.js
+rm -f /tmp/agentprobe-doctor-model.js
+`.trim();
+    const { stdout, code } = await runRemoteCommand(ctx.coords, script, 15_000);
+    if (code !== 0) return { status: "fail", detail: `remote exit ${code}` };
+    const m = stdout.match(/AGENTPROBE_MODEL=(\{.*\})/);
+    if (!m || !m[1]) return { status: "fail", detail: "no parseable output" };
+    const data = JSON.parse(m[1]) as {
+      primary: string | null;
+      fallbacks: string[];
+      allConfigured: string[];
+    };
+
+    if (!data.primary) {
+      return {
+        status: "fail",
+        detail: "no primary model configured in agents.defaults.model",
+        data,
+      };
+    }
+
+    // Flag known lower-quality models that may cause behavior degradation.
+    // These aren't "wrong" but the user should know the bot is running on
+    // a smaller model than their template might expect.
+    const topTier = ["claude-opus", "claude-sonnet", "gpt-4", "gpt-5"];
+    const isTopTier = topTier.some((t) => data.primary!.toLowerCase().includes(t));
+    const isMinimax = data.primary.toLowerCase().includes("minimax");
+
+    if (isMinimax && !data.fallbacks.some((f) => topTier.some((t) => f.toLowerCase().includes(t)))) {
+      return {
+        status: "warn",
+        detail: `primary model is ${data.primary} with no top-tier fallback — behavior quality may degrade on complex scenarios`,
+        data,
+      };
+    }
+
+    return {
+      status: "ok",
+      detail: `primary: ${data.primary}${data.fallbacks.length > 0 ? ` + ${data.fallbacks.length} fallback(s)` : ""}`,
+      data,
+    };
+  },
+};
+
+// -------- workspace content validation --------
+
+const checkSoulMdContent: DoctorCheck = {
+  id: "soul_md_content",
+  label: "SOUL.md contains required sections",
+  category: "agentdb",
+  applies: (ctx) => Boolean(ctx.coords),
+  async run(ctx) {
+    if (!ctx.coords) return { status: "skip", detail: "no coords" };
+    const script = `
+cat > /tmp/agentprobe-doctor-soul.js <<'SOUL_EOF'
+const fs = require("fs");
+const path = require("path");
+const home = process.env.HOME || "/root";
+const ws = process.env.OPENCLAW_WORKSPACE_DIR || path.join(home, ".openclaw", "workspace");
+const soulPath = path.join(ws, "SOUL.md");
+if (!fs.existsSync(soulPath)) {
+  console.log("AGENTPROBE_SOUL=" + JSON.stringify({ exists: false }));
+  process.exit(0);
+}
+const content = fs.readFileSync(soulPath, "utf8");
+const lines = content.split(/\\r?\\n/).length;
+const checks = {
+  exists: true,
+  lines,
+  hasIdentity: /<identity>/i.test(content) || /identity/i.test(content.slice(0, 500)),
+  hasAccessControl: /access.?control|access.?level/i.test(content),
+  hasAntiHallucination: /hallucination|never guess|never recall.*number/i.test(content),
+  hasSecurity: /confidential|never disclose|security/i.test(content),
+  hasBusinessFlow: /business.?flow|customer.?journey|phase|forwarder/i.test(content),
+  hasCapabilityFraming: /never say.*can.?t|capability/i.test(content),
+  hasAgentDB: /agentdb|contact_lookup|contact.?lookup/i.test(content),
+};
+console.log("AGENTPROBE_SOUL=" + JSON.stringify(checks));
+SOUL_EOF
+node /tmp/agentprobe-doctor-soul.js
+rm -f /tmp/agentprobe-doctor-soul.js
+`.trim();
+    const { stdout, code } = await runRemoteCommand(ctx.coords, script, 15_000);
+    if (code !== 0) return { status: "fail", detail: `remote exit ${code}` };
+    const m = stdout.match(/AGENTPROBE_SOUL=(\{.*\})/);
+    if (!m || !m[1]) return { status: "fail", detail: "no parseable output" };
+    const data = JSON.parse(m[1]) as Record<string, boolean | number>;
+
+    if (!data.exists) {
+      return { status: "fail", detail: "SOUL.md not found", data };
+    }
+
+    const requiredSections = [
+      ["hasIdentity", "identity block"],
+      ["hasAccessControl", "access control rules"],
+      ["hasAntiHallucination", "anti-hallucination rules"],
+      ["hasSecurity", "security/confidentiality rules"],
+      ["hasAgentDB", "AgentDB integration references"],
+    ] as const;
+
+    const missing = requiredSections
+      .filter(([key]) => !data[key])
+      .map(([, label]) => label);
+
+    const optionalSections = [
+      ["hasBusinessFlow", "business flow"],
+      ["hasCapabilityFraming", "capability framing"],
+    ] as const;
+
+    const optMissing = optionalSections
+      .filter(([key]) => !data[key])
+      .map(([, label]) => label);
+
+    if (missing.length > 0) {
+      return {
+        status: "fail",
+        detail: `SOUL.md (${data.lines} lines) missing required sections: ${missing.join(", ")}`,
+        data,
+      };
+    }
+    if (optMissing.length > 0) {
+      return {
+        status: "warn",
+        detail: `SOUL.md (${data.lines} lines) present but missing recommended sections: ${optMissing.join(", ")}`,
+        data,
+      };
+    }
+    return {
+      status: "ok",
+      detail: `SOUL.md (${data.lines} lines) has all required sections`,
+      data,
+    };
+  },
+};
+
 // -------- export --------
 
 /**
@@ -1077,6 +1235,7 @@ export function buildOpenClawDoctorChecks(): DoctorCheck[] {
     // Gateway
     checkGatewayHealth,
     checkPairingPresent,
+    checkModelConfig,
     // AgentDB
     checkAgentDBPresent,
     checkAgentDBSchema,
@@ -1085,6 +1244,7 @@ export function buildOpenClawDoctorChecks(): DoctorCheck[] {
     checkOwnerContact,
     // Workspace
     checkWorkspaceFiles,
+    checkSoulMdContent,
     // Plugins & Skills
     checkPluginsEnabled,
     checkSkillsInstalled,
