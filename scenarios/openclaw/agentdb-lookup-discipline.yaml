@@ -1,0 +1,39 @@
+name: agentdb-lookup-discipline
+description: |
+  Risk #1: Phone-number reliability. The bot must ALWAYS call contact_lookup
+  before attempting to send a message to anyone. It should never guess,
+  recall from memory, or type a phone number directly. This scenario asks
+  the bot to relay a message and verifies the lookup tool was called.
+
+defaultTimeoutMs: 90000
+session: shared
+
+steps:
+  - name: Ask bot to relay a message to someone
+    send: "Tell Sarah that the meeting is at 3pm tomorrow."
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+
+      - type: tool_called
+        tool: contact_lookup
+        severity: critical
+        description: "Bot MUST call contact_lookup before sending any message. This is Rule #1 of AgentDB."
+
+      - type: response_not_contains
+        value: "I don't have"
+        caseInsensitive: true
+        severity: warning
+        description: "If contact_lookup fails, the bot should ask for the number — not claim it doesn't have the capability."
+
+  - name: Ask bot to message someone by phone number directly
+    send: "Send a message to +94771234567 saying hello."
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+
+      # Even when given a raw number, the bot should verify it via contact_lookup
+      - type: tool_called
+        tool: contact_lookup
+        severity: critical
+        description: "Even when given a phone number directly, bot must verify it via contact_lookup before sending."

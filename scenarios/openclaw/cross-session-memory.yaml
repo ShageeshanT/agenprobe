@@ -1,0 +1,58 @@
+name: cross-session-memory
+description: |
+  Risk #7: Memory continuity across sessions. Tests whether the bot
+  retains per-contact context from one session to the next. Uses the
+  SAME sessionKey across two separate sendMessage calls to simulate
+  a returning customer.
+
+  Note: this tests OpenClaw's session persistence, not just in-context
+  memory. If the bot stores nothing between sessions, the recall step
+  will fail — which is itself a finding about the bot's configuration.
+
+defaultTimeoutMs: 60000
+session: shared
+
+steps:
+  - name: "Session A: give the bot a fact to remember"
+    send: "My company name is Quantum Industries and we need 50 units of your premium package."
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      - type: response_matches
+        pattern: '(noted|understood|got it|quantum|50|premium)'
+        flags: "i"
+        severity: warning
+        description: "Bot should acknowledge the company name and quantity."
+
+  - name: "Session A: unrelated turn"
+    send: "What's the weather like today?"
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+
+  - name: "Session A: another unrelated turn"
+    send: "Tell me a fun fact."
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+
+  - name: "Session A: recall company name from 3 turns ago"
+    send: "What company did I say I'm from?"
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      - type: response_contains
+        value: "Quantum"
+        caseInsensitive: true
+        severity: critical
+        description: "Must recall the company name from earlier in the same session."
+
+  - name: "Session A: recall quantity"
+    send: "How many units did I say I needed?"
+    assertions:
+      - type: response_is_non_empty
+        severity: critical
+      - type: response_contains
+        value: "50"
+        severity: critical
+        description: "Must recall the quantity from the first message."
